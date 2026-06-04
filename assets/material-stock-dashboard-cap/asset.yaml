@@ -1,0 +1,27 @@
+apiVersion: asset.sap/v1
+kind: Asset
+
+metadata:
+  name: material-stock-dashboard-cap
+  version: 1.0.0
+  description: "CAP BTP Extension — Material Stock Level Monitoring Dashboard with React UI"
+
+type: cap-app
+
+provides:
+  protocols: [odata-v4, rest]
+
+components:
+  # CAP backend — built from source root so platform runs `cds build --production`
+  # Uses SQLite for persistence (no HANA HDI deployment needed)
+  - name: srv
+    type: srv
+    buildPath: .
+    outputPath: gen/srv
+    provides:
+      endpoints:
+        - path: /stock
+          port: 4004
+          protocol: http
+      protocols: [odata-v4, rest]
+    port: 4004

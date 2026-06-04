@@ -1,0 +1,319 @@
+{
+  "servers": {
+    "s4-material-stock": {
+      "mcp_server_name": "com.sap.s4/API_MATERIAL_STOCK_SRV",
+      "description": "SAP S/4HANA Material Stock Read — real-time stock by category",
+      "tools": {
+        "get_material_stock": {
+          "description": "Read real-time material stock levels from S/4HANA by material, plant, and optional storage location.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "material": {"type": "string", "description": "SAP material number (e.g. 'FG-001')"},
+              "plant": {"type": "string", "description": "SAP plant code (e.g. '1010')"},
+              "storage_location": {"type": "string", "description": "Optional storage location code"}
+            },
+            "required": ["material", "plant"]
+          },
+          "mock_response": {
+            "material": "FG-001",
+            "plant": "1010",
+            "storage_location": "ALL",
+            "unrestricted_stock": 150.0,
+            "in_transit_stock": 30.0,
+            "reserved_stock": 50.0,
+            "safety_stock": 80.0,
+            "unit_of_measure": "EA",
+            "top_limit_applied": 100,
+            "note": "Stock data retrieved from A_MaterialStock. Results limited to 100 rows."
+          }
+        }
+      }
+    },
+    "s4-mrp-planning": {
+      "mcp_server_name": "com.sap.s4/API_MRP_MATERIALS_SRV_01",
+      "description": "SAP S/4HANA Material Planning Data — MRP demand elements and safety stock",
+      "tools": {
+        "get_demand_elements": {
+          "description": "Retrieve MRP demand and supply elements for a material/plant from S/4HANA.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "material": {"type": "string", "description": "SAP material number"},
+              "plant": {"type": "string", "description": "SAP plant code"},
+              "date_from": {"type": "string", "description": "Optional ISO date filter start"},
+              "date_to": {"type": "string", "description": "Optional ISO date filter end"}
+            },
+            "required": ["material", "plant"]
+          },
+          "mock_response": {
+            "material": "FG-001",
+            "plant": "1010",
+            "date_from": "",
+            "date_to": "",
+            "safety_stock": 80.0,
+            "reorder_point": 100.0,
+            "demand_elements": [
+              {
+                "type": "Sales Order",
+                "document_number": "4500012345",
+                "quantity": 120.0,
+                "date": "2026-06-10",
+                "element_type": "DEMAND"
+              },
+              {
+                "type": "Reservation",
+                "document_number": "0000001234",
+                "quantity": 30.0,
+                "date": "2026-06-08",
+                "element_type": "DEMAND"
+              }
+            ],
+            "supply_elements": [
+              {
+                "type": "Purchase Order",
+                "document_number": "4500099999",
+                "quantity": 200.0,
+                "date": "2026-06-15",
+                "element_type": "SUPPLY"
+              }
+            ],
+            "top_limit_applied": 100,
+            "note": "Demand elements from SupplyDemandItems. Results limited to 100 rows."
+          }
+        }
+      }
+    },
+    "s4-atp-check": {
+      "mcp_server_name": "com.sap.s4/CE_APIAVAILTOPROMISECHECK_0001",
+      "description": "SAP S/4HANA Advanced ATP Check — order feasibility simulation",
+      "tools": {
+        "run_atp_check": {
+          "description": "Run an Advanced ATP check for a material/plant combination.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "material": {"type": "string", "description": "SAP material number"},
+              "plant": {"type": "string", "description": "SAP plant code"},
+              "requested_quantity": {"type": "number", "description": "Quantity requested"},
+              "requested_date": {"type": "string", "description": "Required delivery date ISO format"},
+              "sales_order": {"type": "string", "description": "Optional sales order number"},
+              "sales_order_item": {"type": "string", "description": "Optional sales order item"}
+            },
+            "required": ["material", "plant", "requested_quantity", "requested_date"]
+          },
+          "mock_response": {
+            "material": "FG-001",
+            "plant": "1010",
+            "sales_order": "4500012345",
+            "sales_order_item": "10",
+            "requested_quantity": 50.0,
+            "requested_date": "2026-06-10",
+            "confirmed_quantity": 50.0,
+            "atp_date": "2026-06-10",
+            "unfulfilled_quantity": 0.0,
+            "reason_code": "",
+            "reason_text": "Full quantity confirmed",
+            "is_fully_confirmed": true,
+            "note": "ATP result from CE_APIAVAILTOPROMISECHECK_0001."
+          }
+        }
+      }
+    },
+    "s4-planned-orders": {
+      "mcp_server_name": "com.sap.s4/API_PLANNED_ORDERS",
+      "description": "SAP S/4HANA Planned Orders — read and conversion",
+      "tools": {
+        "get_planned_orders": {
+          "description": "Retrieve open planned orders for a material/plant from S/4HANA.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "material": {"type": "string", "description": "SAP material number"},
+              "plant": {"type": "string", "description": "SAP plant code"},
+              "date_from": {"type": "string", "description": "Optional date filter start"},
+              "date_to": {"type": "string", "description": "Optional date filter end"}
+            },
+            "required": ["material", "plant"]
+          },
+          "mock_response": {
+            "material": "FG-001",
+            "plant": "1010",
+            "date_from": "",
+            "date_to": "",
+            "planned_orders": [
+              {
+                "planned_order": "0000012345",
+                "order_type": "PE",
+                "quantity": 200.0,
+                "basic_start_date": "2026-06-12",
+                "basic_end_date": "2026-06-15",
+                "procurement_type": "E",
+                "conversion_eligible": true
+              }
+            ],
+            "top_limit_applied": 100,
+            "note": "Planned orders from A_PlannedOrder entity set. Results limited to 100 rows."
+          }
+        },
+        "convert_planned_order": {
+          "description": "Convert a planned order to a production or purchase order in S/4HANA.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "planned_order": {"type": "string", "description": "Planned order number"},
+              "conversion_order_type": {"type": "string", "description": "'production' or 'purchase'"},
+              "approved_by": {"type": "string", "description": "User ID who approved the action"}
+            },
+            "required": ["planned_order"]
+          },
+          "mock_response": {
+            "planned_order": "0000012345",
+            "converted_document_number": "PRD_0000012345",
+            "order_type": "production",
+            "status": "CONVERTED",
+            "converted_at": "2026-06-03T10:00:00Z",
+            "approved_by": "PLANNER_USER",
+            "note": "Planned order converted via API_PLANNED_ORDERS MCP tool."
+          }
+        }
+      }
+    },
+    "s4-supply-chain": {
+      "mcp_server_name": "com.sap.s4/CE_STOCKTRANSPORTORDER_0001",
+      "description": "SAP S/4HANA Stock Transport Order and corrective action tools",
+      "tools": {
+        "propose_corrective_actions": {
+          "description": "Simulate and rank corrective alternatives for a stock shortfall.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "material": {"type": "string", "description": "SAP material number"},
+              "plant": {"type": "string", "description": "SAP plant code"},
+              "shortfall_quantity": {"type": "number", "description": "Unfulfilled quantity"},
+              "required_date": {"type": "string", "description": "Date shortfall must be resolved"}
+            },
+            "required": ["material", "plant", "shortfall_quantity", "required_date"]
+          },
+          "mock_response": {
+            "material": "FG-001",
+            "plant": "1010",
+            "shortfall_quantity": 25.0,
+            "required_date": "2026-06-10",
+            "options": [
+              {
+                "rank": 1,
+                "type": "PARTIAL_FULFILLMENT",
+                "description": "Ship confirmed quantity immediately; create backorder for remainder.",
+                "estimated_lead_days": 0,
+                "quantity_covered": 25.0,
+                "trade_offs": "Customer receives partial shipment; remainder delayed.",
+                "requires_approval": true
+              },
+              {
+                "rank": 2,
+                "type": "PLANNED_ORDER_CONVERSION",
+                "description": "Convert an open planned order to cover the shortfall.",
+                "estimated_lead_days": 3,
+                "quantity_covered": 25.0,
+                "trade_offs": "Requires production capacity; 3-day lead time.",
+                "requires_approval": true
+              }
+            ],
+            "note": "All options require explicit human approval before execution."
+          }
+        },
+        "create_stock_transport_order": {
+          "description": "Create a Stock Transport Order (STO) between two plants in S/4HANA.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "material": {"type": "string", "description": "SAP material number"},
+              "supplying_plant": {"type": "string", "description": "Plant providing the stock"},
+              "receiving_plant": {"type": "string", "description": "Plant receiving the stock"},
+              "quantity": {"type": "number", "description": "Transfer quantity"},
+              "unit": {"type": "string", "description": "Unit of measure"},
+              "delivery_date": {"type": "string", "description": "Required delivery date ISO format"},
+              "approved_by": {"type": "string", "description": "User ID who approved the action"}
+            },
+            "required": ["material", "supplying_plant", "receiving_plant", "quantity", "unit", "delivery_date"]
+          },
+          "mock_response": {
+            "sto_document_number": "4500099001",
+            "material": "FG-001",
+            "supplying_plant": "1020",
+            "receiving_plant": "1010",
+            "quantity": 25.0,
+            "unit": "EA",
+            "delivery_date": "2026-06-15",
+            "status": "CREATED",
+            "created_at": "2026-06-03T10:00:00Z",
+            "approved_by": "PLANNER_USER",
+            "note": "STO creation dispatched via CE_STOCKTRANSPORTORDER_0001 MCP tool."
+          }
+        },
+        "adjust_pir": {
+          "description": "Adjust the quantity of a Planned Independent Requirement (PIR) in S/4HANA.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "material": {"type": "string", "description": "SAP material number"},
+              "plant": {"type": "string", "description": "SAP plant code"},
+              "version": {"type": "string", "description": "PIR version"},
+              "requirement_date": {"type": "string", "description": "PIR requirement date ISO format"},
+              "new_quantity": {"type": "number", "description": "Updated planned quantity"},
+              "approved_by": {"type": "string", "description": "User ID who approved the action"}
+            },
+            "required": ["material", "plant", "version", "requirement_date", "new_quantity"]
+          },
+          "mock_response": {
+            "material": "FG-001",
+            "plant": "1010",
+            "version": "00",
+            "requirement_date": "2026-06-30",
+            "old_quantity": 150.0,
+            "new_quantity": 100.0,
+            "document_number": "PIR_FG-001_2026-06-30",
+            "updated_at": "2026-06-03T10:00:00Z",
+            "approved_by": "PLANNER_USER",
+            "note": "PIR quantity updated via API_PLND_INDEP_RQMT_SRV MCP tool."
+          }
+        },
+        "flag_po_expedite": {
+          "description": "Flag a purchase order item for buyer expedite action in S/4HANA.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "purchase_order": {"type": "string", "description": "PO document number"},
+              "purchase_order_item": {"type": "string", "description": "PO line item number"},
+              "expedite_reason": {"type": "string", "description": "Business reason for expediting"},
+              "buyer_note": {"type": "string", "description": "Optional message to the buyer"},
+              "approved_by": {"type": "string", "description": "User ID who approved the action"}
+            },
+            "required": ["purchase_order", "purchase_order_item", "expedite_reason"]
+          },
+          "mock_response": {
+            "purchase_order": "4500099999",
+            "purchase_order_item": "00010",
+            "expedite_reason": "Safety stock breach at Plant 1010",
+            "buyer_note": "Please advance delivery by 5 days",
+            "flagged_at": "2026-06-03T10:00:00Z",
+            "status": "PENDING_BUYER_ACTION",
+            "approved_by": "PROCUREMENT_MGR",
+            "note": "Expedite request created. Buyer will be notified via purchasing workflow."
+          }
+        }
+      }
+    }
+  },
+  "metadata": {
+    "version": "1.0.0",
+    "created_for_agent": "inventory-atp-agent",
+    "mock_mode": true,
+    "deterministic": true,
+    "total_servers": 5,
+    "total_tools": 9,
+    "generated_from": ["tool-signatures"],
+    "generation_date": "2026-06-03"
+  }
+}

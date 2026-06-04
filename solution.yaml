@@ -1,0 +1,11 @@
+apiVersion: solution.sap/v1
+kind: Solution
+
+metadata:
+  name: material-stock-dashboard-890c0
+  version: 1.0.0
+  description: "Dashboard showing materials with sufficient stock and nearly out-of-stock materials with storage location, sourced from SAP S/4HANA Cloud Public Edition."
+
+assets:
+  - ref: ./assets/material-stock-dashboard-cap/asset.yaml
+  - ref: ./assets/stock-advisor-agent/asset.yaml
