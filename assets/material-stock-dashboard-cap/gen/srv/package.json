@@ -33,6 +33,9 @@
         "credentials": {
           "destination": "S4HANA_MATERIAL_STOCK"
         }
+      },
+      "[production]": {
+        "auth": "xsuaa"
       }
     },
     "[development]": {
@@ -47,7 +50,8 @@
           "credentials": {
             "url": "/app/db.sqlite"
           }
-        }
+        },
+        "auth": "dummy"
       }
     }
   },

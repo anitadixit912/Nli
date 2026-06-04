@@ -24,6 +24,7 @@
     "StockService": {
       "@source": "srv/stock-service.cds",
       "kind": "service",
+      "@requires": "authenticated-user",
       "@path": "/stock"
     },
     "StockService.MaterialStockView": {

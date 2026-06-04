@@ -1,6 +1,7 @@
 using { material.stock as db } from '../db/schema';
 using { API_MATERIAL_STOCK_SRV as external } from './external/API_MATERIAL_STOCK_SRV';
 
+@requires: 'authenticated-user'
 service StockService @(path: '/stock') {
 
   @readonly

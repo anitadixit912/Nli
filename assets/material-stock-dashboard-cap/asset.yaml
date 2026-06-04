@@ -11,6 +11,13 @@ type: cap-app
 provides:
   protocols: [odata-v4, rest]
 
+services:
+  - name: material-stock-xsuaa
+    type: xsuaa
+    config:
+      xsappname: material-stock-dashboard
+      tenant-mode: dedicated
+
 components:
   # CAP backend — built from source root so platform runs `cds build --production`
   # Uses SQLite for persistence (no HANA HDI deployment needed)
@@ -25,3 +32,5 @@ components:
           protocol: http
       protocols: [odata-v4, rest]
     port: 4004
+    bindings:
+      - material-stock-xsuaa

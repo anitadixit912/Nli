@@ -23,9 +23,6 @@
     "server": {
       "livereload": false
     },
-    "folders": {
-      "app": "app/react-ui/dist"
-    },
     "requires": {
       "API_MATERIAL_STOCK_SRV": {
         "kind": "odata-v2",
@@ -33,6 +30,9 @@
         "credentials": {
           "destination": "S4HANA_MATERIAL_STOCK"
         }
+      },
+      "[production]": {
+        "auth": "xsuaa"
       }
     },
     "[development]": {
@@ -41,6 +41,9 @@
       }
     },
     "[production]": {
+      "folders": {
+        "app": "app/react-ui/dist"
+      },
       "requires": {
         "db": {
           "kind": "sqlite",

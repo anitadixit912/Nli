@@ -1,1 +1,30 @@
-{}
+{
+  "solution_id": "801ab0c7-8331-40e1-bfe6-1f8ce60b2681",
+  "deployment_job_id": "e9cd834f-4c63-4759-95d3-ed3b88dcee2e",
+  "deployment_index": 18,
+  "status": "completed",
+  "deployed_at": "2026-06-04T08:05:09Z",
+  "assets": [
+    {
+      "asset_name": "material-stock-dashboard-cap",
+      "type": "cap-app",
+      "status": "running",
+      "url": "https://801ab0c7-62d803a4.joule-stg-eu12.c.run.ai.cloud.sap",
+      "version": "1.0.0",
+      "deployed_at": "2026-06-04T08:04:37Z"
+    },
+    {
+      "asset_name": "stock-advisor-agent",
+      "type": "agent",
+      "status": "running",
+      "url": "https://801ab0c7-a7f0093b.joule-stg-eu12.c.run.ai.cloud.sap",
+      "version": "1.0.0",
+      "deployed_at": "2026-06-04T08:05:04Z"
+    }
+  ],
+  "notes": {
+    "db": "SQLite (ephemeral) — no HANA HDI deployer needed on this platform",
+    "auth": "xsuaa — XSUAA service bound, StockViewer role collection required",
+    "api": "Material Stock data served from rule-based mock (real S4HANA via destination S4HANA_MATERIAL_STOCK when available)"
+  }
+}

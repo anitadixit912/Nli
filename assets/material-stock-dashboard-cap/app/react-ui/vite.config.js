@@ -3,8 +3,9 @@ import AdmZip from 'adm-zip'
 import react from '@vitejs/plugin-react'
 
 export default defineConfig({
+  base: '/react-ui/',
   plugins: [react(), {
-      name: 'zip-dist', // zipping ./dist is required for BTP HTML5 repo or Application Frontend deployment
+      name: 'zip-dist',
       closeBundle() {
         const zip = new AdmZip()
         zip.addLocalFolder('dist')
@@ -13,6 +14,7 @@ export default defineConfig({
   }],
   server: {
     proxy: {
+      '/stock': 'http://localhost:4004',
       '/odata': 'http://localhost:4004'
     }
   }

@@ -40,6 +40,9 @@ export default function App() {
     try {
       // Fetch threshold config
       const cfgRes = await fetch('/stock/StockThresholdConfig(1)')
+      if (cfgRes.status === 401 || cfgRes.status === 403) {
+        throw new Error('Session expired or unauthorized. Please refresh the page and log in again.')
+      }
       if (cfgRes.ok) {
         const cfg = await cfgRes.json()
         const pct = Number(cfg.safetyStockPct)
@@ -48,6 +51,9 @@ export default function App() {
       }
       // Fetch all classified stock
       const res = await fetch('/stock/MaterialStockView')
+      if (res.status === 401 || res.status === 403) {
+        throw new Error('Session expired or unauthorized. Please refresh the page and log in again.')
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
       const data = await res.json()
       setAllStock(data.value || [])
@@ -67,11 +73,15 @@ export default function App() {
     const newPct = Number(pendingPct)
     if (isNaN(newPct) || newPct < 0 || newPct > 100) return
     try {
-      await fetch('/stock/StockThresholdConfig(1)', {
+      const patchRes = await fetch('/stock/StockThresholdConfig(1)', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ safetyStockPct: newPct }),
       })
+      if (patchRes.status === 401 || patchRes.status === 403) {
+        setError('Session expired or unauthorized. Please refresh the page and log in again.')
+        return
+      }
       setSafetyPct(newPct)
       await fetchData()
     } catch (e) {
