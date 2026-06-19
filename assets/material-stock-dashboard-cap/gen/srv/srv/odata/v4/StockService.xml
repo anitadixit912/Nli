@@ -22,6 +22,7 @@
       <EntityContainer Name="EntityContainer">
         <EntitySet Name="MaterialStockView" EntityType="StockService.MaterialStockView"/>
         <EntitySet Name="StockThresholdConfig" EntityType="StockService.StockThresholdConfig"/>
+        <ActionImport Name="updateThreshold" Action="StockService.updateThreshold"/>
         <ActionImport Name="chat" Action="StockService.chat"/>
       </EntityContainer>
       <EntityType Name="MaterialStockView">
@@ -40,6 +41,7 @@
         <Property Name="SafetyStock" Type="Edm.Decimal" Precision="13" Scale="3"/>
         <Property Name="StockStatus" Type="Edm.String" MaxLength="30"/>
         <Property Name="RiskReason" Type="Edm.String" MaxLength="60"/>
+        <Property Name="RiskDescription" Type="Edm.String" MaxLength="500"/>
       </EntityType>
       <EntityType Name="StockThresholdConfig">
         <Key>
@@ -48,12 +50,33 @@
         <Property Name="id" Type="Edm.Int32" Nullable="false" DefaultValue="1"/>
         <Property Name="safetyStockPct" Type="Edm.Decimal" Precision="5" Scale="2" DefaultValue="20"/>
       </EntityType>
+      <Action Name="updateThreshold" IsBound="false">
+        <Parameter Name="safetyStockPct" Type="Edm.Decimal" Precision="5" Scale="2" Nullable="false"/>
+        <ReturnType Type="Edm.Decimal" Precision="5" Scale="2"/>
+      </Action>
       <Action Name="chat" IsBound="false">
-        <Parameter Name="message" Type="Edm.String" Nullable="false"/>
-        <Parameter Name="contextId" Type="Edm.String"/>
+        <Parameter Name="message" Type="Edm.String" MaxLength="1000" Nullable="false"/>
+        <Parameter Name="contextId" Type="Edm.String" MaxLength="100"/>
         <ReturnType Type="Edm.String"/>
       </Action>
       <Annotations Target="StockService.EntityContainer/MaterialStockView">
+        <Annotation Term="Capabilities.DeleteRestrictions">
+          <Record Type="Capabilities.DeleteRestrictionsType">
+            <PropertyValue Property="Deletable" Bool="false"/>
+          </Record>
+        </Annotation>
+        <Annotation Term="Capabilities.InsertRestrictions">
+          <Record Type="Capabilities.InsertRestrictionsType">
+            <PropertyValue Property="Insertable" Bool="false"/>
+          </Record>
+        </Annotation>
+        <Annotation Term="Capabilities.UpdateRestrictions">
+          <Record Type="Capabilities.UpdateRestrictionsType">
+            <PropertyValue Property="Updatable" Bool="false"/>
+          </Record>
+        </Annotation>
+      </Annotations>
+      <Annotations Target="StockService.EntityContainer/StockThresholdConfig">
         <Annotation Term="Capabilities.DeleteRestrictions">
           <Record Type="Capabilities.DeleteRestrictionsType">
             <PropertyValue Property="Deletable" Bool="false"/>
