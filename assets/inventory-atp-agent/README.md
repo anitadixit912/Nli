@@ -1,6 +1,6 @@
-# Inventory ATP Agentic Copilot
+# Inventory ATP Agent
 
-An AI agent that proactively ensures order fulfillment and prevents stockouts by perceiving real-time S/4HANA inventory signals, planning multi-step ATP checks and simulations, and executing policy-controlled actions with mandatory human approvals.
+An AI agent that analyzes inventory availability, explains stock drops, checks order feasibility via ATP, simulates corrective options, and executes approved supply chain actions.
 
 ## Overview
 
