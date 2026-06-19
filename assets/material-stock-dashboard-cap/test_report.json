@@ -3,7 +3,8 @@
     "total": 6,
     "passed": 6,
     "failed": 0,
-    "score": 100
+    "score": 100,
+    "coverage": 25.26
   },
   "sections": [
     {
@@ -18,7 +19,7 @@
         {
           "name": "StockService — classification logic should return both sufficient and at-risk materials",
           "outcome": "passed",
-          "duration": 0.014
+          "duration": 0.01
         },
         {
           "name": "StockService — classification logic should classify material with stock well above thresholds as SUFFICIENT",
@@ -43,7 +44,7 @@
         {
           "name": "StockService — classification logic should store and retrieve StockThresholdConfig",
           "outcome": "passed",
-          "duration": 0.002
+          "duration": 0.004
         }
       ]
     }
