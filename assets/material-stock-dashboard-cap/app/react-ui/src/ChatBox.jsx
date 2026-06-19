@@ -34,7 +34,9 @@ export default function ChatBox() {
   const [input, setInput]         = useState('')
   const [loading, setLoading]     = useState(false)
   const [error, setError]         = useState(null)
-  const [contextId]               = useState(`chat-${Date.now()}`)
+  // Use crypto.randomUUID() for an unpredictable session ID — prevents
+  // sequential timestamp guessing that could allow conversation hijacking.
+  const [contextId]               = useState(() => crypto.randomUUID())
   const messagesEndRef             = useRef(null)
 
   useEffect(() => {
@@ -62,8 +64,11 @@ export default function ChatBox() {
       const reply = data?.value || data?.result || 'No response received.'
       setMessages(prev => [...prev, { role: 'agent', text: reply }])
     } catch (e) {
-      setError(e.message)
-      setMessages(prev => [...prev, { role: 'agent', text: `⚠️ Sorry, I encountered an error: ${e.message}` }])
+      // Log full error internally; show only a generic message to the user
+      // to avoid leaking internal endpoint paths, status codes, or response bodies.
+      console.error('ChatBox sendMessage error:', e)
+      setError('Unable to reach the Stock Advisor. Please try again.')
+      setMessages(prev => [...prev, { role: 'agent', text: '⚠️ Sorry, I was unable to process your request. Please try again.' }])
     } finally {
       setLoading(false)
     }
@@ -159,6 +164,12 @@ export default function ChatBox() {
           disabled={!input.trim() || loading}
           tooltip="Send message"
         />
+      </div>
+
+      {/* PII Notice */}
+      <div className="chatbox-pii-notice">
+        🔒 Do not enter personal data (names, emails, phone numbers) in this chat.
+        Conversations are held in memory and cleared after 1 hour of inactivity.
       </div>
     </div>
   )
