@@ -1,10 +1,11 @@
 {
   "name": "material-stock-dashboard-cap",
-  "version": "1.0.0",
+  "version": "1.7.0",
   "dependencies": {
     "@cap-js/sqlite": "^2.4",
     "@sap/cds": "^9",
-    "@sap/xssec": "^4"
+    "@sap/xssec": "^3",
+    "passport": "^0.7.0"
   },
   "devDependencies": {
     "@cap-js/cds-test": "^1.0.1",
@@ -30,9 +31,6 @@
         "credentials": {
           "destination": "S4HANA_MATERIAL_STOCK"
         }
-      },
-      "[production]": {
-        "auth": "xsuaa"
       }
     },
     "[development]": {
@@ -50,6 +48,9 @@
           "credentials": {
             "url": "/app/db.sqlite"
           }
+        },
+        "auth": {
+          "kind": "xsuaa"
         }
       }
     }
