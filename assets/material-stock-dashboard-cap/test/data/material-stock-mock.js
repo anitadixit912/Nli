@@ -15,7 +15,7 @@ const mockStockData = [
   { Material: 'MAT-1004', Plant: '2000', StorageLocation: 'SL10', MaterialDescription: 'Hydraulic Fluid ISO 46', StockQuantity: 450, BaseUnit: 'L',   ReorderPoint: 100, SafetyStock: 200 },
   { Material: 'MAT-1005', Plant: '2000', StorageLocation: 'SL10', MaterialDescription: 'Bearing 6205-2RS', StockQuantity: 850, BaseUnit: 'EA',  ReorderPoint: 200, SafetyStock: 300 },
   { Material: 'MAT-1006', Plant: '2000', StorageLocation: 'SL11', MaterialDescription: 'V-Belt A50', StockQuantity: 200, BaseUnit: 'EA',  ReorderPoint: 30,  SafetyStock: 50  },
-  { Material: 'MAT-1007', Plant: '3000', StorageLocation: 'SL20', MaterialDescription: 'Paint Primer Grey 1L', StockQuantity: 600, BaseUnit: 'EA',  ReorderPoint: 100, SafetyStock: 200 },
+  { Material: 'MAT-1007', Plant: '3000', StorageLocation: 'SL20', MaterialDescription: 'Paint Primer Grey 1L', StockQuantity: 50,  BaseUnit: 'EA',  ReorderPoint: 100, SafetyStock: 200 },
 
   // Nearly out of stock — below reorder point only
   { Material: 'MAT-2001', Plant: '1000', StorageLocation: 'SL01', MaterialDescription: 'Stainless Steel Tube 10mm', StockQuantity: 40,  BaseUnit: 'M',   ReorderPoint: 100, SafetyStock: 150 },
