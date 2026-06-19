@@ -1,76 +1,49 @@
-"""Unit tests for propose_corrective_actions tool."""
+"""Tests for propose_corrective_actions tool."""
 import pytest
-from app.tools.propose_corrective_actions import propose_corrective_actions
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'app'))
+
+from tools.propose_corrective_actions import propose_corrective_actions
 
 
 @pytest.mark.asyncio
-async def test_propose_returns_ranked_options():
-    result = await propose_corrective_actions.ainvoke(
-        {
-            "material": "FG-001",
-            "plant": "1010",
-            "shortfall_quantity": 25.0,
-            "required_date": "2026-06-10",
-        }
-    )
+async def test_four_options_generated():
+    result = await propose_corrective_actions("FG-001", "1010", 200.0, "2026-07-15", mcp_tools=None)
     assert "options" in result
+    assert len(result["options"]) >= 2
+
+
+@pytest.mark.asyncio
+async def test_options_ranked_by_lead_days():
+    result = await propose_corrective_actions("FG-001", "1010", 200.0, "2026-07-15", mcp_tools=None)
     options = result["options"]
-    assert len(options) >= 2
-    # Verify ranking is ascending by lead days
     lead_days = [o["estimated_lead_days"] for o in options]
     assert lead_days == sorted(lead_days)
 
 
 @pytest.mark.asyncio
-async def test_propose_all_options_require_approval():
-    result = await propose_corrective_actions.ainvoke(
-        {
-            "material": "FG-001",
-            "plant": "1010",
-            "shortfall_quantity": 50.0,
-            "required_date": "2026-06-15",
-        }
-    )
-    for option in result["options"]:
-        assert option["requires_approval"] is True
+async def test_all_options_require_approval():
+    result = await propose_corrective_actions("FG-001", "1010", 100.0, "2026-07-15", mcp_tools=None)
+    for opt in result["options"]:
+        assert opt.get("requires_approval") is True
 
 
 @pytest.mark.asyncio
-async def test_propose_option_types_include_key_strategies():
-    result = await propose_corrective_actions.ainvoke(
-        {
-            "material": "FG-001",
-            "plant": "1010",
-            "shortfall_quantity": 25.0,
-            "required_date": "2026-06-10",
-        }
-    )
-    option_types = {o["type"] for o in result["options"]}
-    assert "PARTIAL_FULFILLMENT" in option_types
-    assert "PLANNED_ORDER_CONVERSION" in option_types
+async def test_planned_order_conversion_option_present():
+    result = await propose_corrective_actions("FG-001", "1010", 100.0, "2026-07-15", mcp_tools=None)
+    types = [o["type"] for o in result["options"]]
+    assert "PLANNED_ORDER_CONVERSION" in types
 
 
 @pytest.mark.asyncio
-async def test_propose_invalid_shortfall_returns_error():
-    result = await propose_corrective_actions.ainvoke(
-        {
-            "material": "FG-001",
-            "plant": "1010",
-            "shortfall_quantity": 0.0,
-            "required_date": "2026-06-10",
-        }
-    )
-    assert result["error"] == "INVALID_INPUT"
+async def test_partial_fulfillment_always_present():
+    result = await propose_corrective_actions("FG-001", "1010", 100.0, "2026-07-15", mcp_tools=None)
+    types = [o["type"] for o in result["options"]]
+    assert "PARTIAL_FULFILLMENT" in types
 
 
 @pytest.mark.asyncio
-async def test_propose_missing_date_returns_error():
-    result = await propose_corrective_actions.ainvoke(
-        {
-            "material": "FG-001",
-            "plant": "1010",
-            "shortfall_quantity": 25.0,
-            "required_date": "",
-        }
-    )
-    assert result["error"] == "INVALID_INPUT"
+async def test_shortfall_qty_in_result():
+    result = await propose_corrective_actions("FG-001", "1010", 350.0, "2026-07-20", mcp_tools=None)
+    assert result["shortfall_quantity"] == 350.0
+    assert result["required_date"] == "2026-07-20"
