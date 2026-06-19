@@ -137,3 +137,14 @@
   border-top: 1px solid var(--sapNeutralBorderColor, #d9d9d9);
   align-items: center;
 }
+
+/* ── PII Notice ────────────────────────────────────────────────── */
+.chatbox-pii-notice {
+  font-size: 0.72rem;
+  color: var(--sapNeutralColor, #6a6d70);
+  background: var(--sapNeutralBackground, #f5f5f5);
+  border-top: 1px solid var(--sapNeutralBorderColor, #e0e0e0);
+  padding: 0.35rem 0.75rem;
+  text-align: center;
+  letter-spacing: 0.01em;
+}
