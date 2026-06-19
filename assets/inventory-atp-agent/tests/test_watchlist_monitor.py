@@ -1,94 +1,83 @@
-"""Unit tests for watchlist_monitor."""
+"""Tests for watchlist_monitor tool."""
 import pytest
-from unittest.mock import AsyncMock
-from app.tools.watchlist_monitor import check_watchlist, compute_breach_severity
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'app'))
+
+from tools.watchlist_monitor import watchlist_monitor
 
 
-# --- Unit tests for severity classifier ---
+def _make_stock_mock(unrestricted_stock: float):
+    async def mock_tool(**kwargs):
+        return {
+            "value": [{
+                "Material": kwargs.get("Material", "FG-001"),
+                "Plant": kwargs.get("Plant", "1010"),
+                "StorageLocation": "0001",
+                "MatlWrhsStkQtyInMatlBaseUnit": unrestricted_stock,
+                "MaterialStockInTransferQty": 0.0,
+                "MatlStkQtyInMatlBaseUnit": 0.0,
+                "SafetyStock": 50.0,
+                "MaterialBaseUnit": "EA",
+            }]
+        }
+    return {"API_MATERIAL_STOCK_SRV__A_MaterialStock_Read": mock_tool}
 
-def test_severity_high_when_stock_zero():
-    assert compute_breach_severity(0.0, 80.0) == "HIGH"
-
-
-def test_severity_high_when_below_25_percent():
-    assert compute_breach_severity(10.0, 80.0) == "HIGH"
-
-
-def test_severity_medium_when_between_25_and_75_percent():
-    assert compute_breach_severity(40.0, 80.0) == "MEDIUM"
-
-
-def test_severity_low_when_above_75_percent():
-    assert compute_breach_severity(70.0, 80.0) == "LOW"
-
-
-def test_severity_zero_threshold_returns_low():
-    assert compute_breach_severity(100.0, 0.0) == "LOW"
-
-
-# --- Integration tests for check_watchlist ---
 
 @pytest.mark.asyncio
-async def test_watchlist_detects_breach():
-    mock_fetcher = AsyncMock(return_value={
-        "material": "FG-001",
-        "plant": "1010",
-        "unrestricted_stock": 20.0,
-        "unit_of_measure": "EA",
-    })
-    entries = [
-        {"material": "FG-001", "plant": "1010", "safety_stock_threshold": 80.0, "sla_date": "2026-06-10"}
-    ]
-    alerts = await check_watchlist(entries, mock_fetcher)
+async def test_high_severity_breach():
+    tools = _make_stock_mock(10.0)  # 10 vs threshold 100 → 90% deficit → HIGH
+    watchlist = [{"material": "FG-001", "plant": "1010", "safety_stock_threshold": 100.0, "sla_date": "2026-07-15"}]
+    alerts = await watchlist_monitor(watchlist, mcp_tools=tools)
     assert len(alerts) == 1
-    assert alerts[0]["alert_type"] == "SAFETY_STOCK_BREACH"
-    assert alerts[0]["material"] == "FG-001"
-    assert alerts[0]["breach_severity"] in ("HIGH", "MEDIUM", "LOW")
-
-
-@pytest.mark.asyncio
-async def test_watchlist_no_alert_when_stock_sufficient():
-    mock_fetcher = AsyncMock(return_value={
-        "material": "FG-001",
-        "plant": "1010",
-        "unrestricted_stock": 200.0,
-        "unit_of_measure": "EA",
-    })
-    entries = [
-        {"material": "FG-001", "plant": "1010", "safety_stock_threshold": 80.0, "sla_date": "2026-06-10"}
-    ]
-    alerts = await check_watchlist(entries, mock_fetcher)
-    assert len(alerts) == 0
-
-
-@pytest.mark.asyncio
-async def test_watchlist_skips_entry_with_api_error():
-    mock_fetcher = AsyncMock(return_value={"error": "API_UNAVAILABLE"})
-    entries = [
-        {"material": "FG-001", "plant": "1010", "safety_stock_threshold": 80.0, "sla_date": "2026-06-10"}
-    ]
-    alerts = await check_watchlist(entries, mock_fetcher)
-    assert len(alerts) == 0
-
-
-@pytest.mark.asyncio
-async def test_watchlist_skips_entry_missing_material():
-    mock_fetcher = AsyncMock(return_value={"unrestricted_stock": 10.0})
-    entries = [{"material": "", "plant": "1010", "safety_stock_threshold": 80.0}]
-    alerts = await check_watchlist(entries, mock_fetcher)
-    assert len(alerts) == 0
-    mock_fetcher.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_watchlist_high_severity_breach():
-    mock_fetcher = AsyncMock(return_value={
-        "material": "FG-001",
-        "plant": "1010",
-        "unrestricted_stock": 5.0,
-    })
-    entries = [
-        {"material": "FG-001", "plant": "1010", "safety_stock_threshold": 80.0, "sla_date": "2026-06-10"}
-    ]
-    alerts = await check_watchlist(entries, mock_fetcher)
     assert alerts[0]["breach_severity"] == "HIGH"
+    assert alerts[0]["alert_type"] == "SAFETY_STOCK_BREACH"
+
+
+@pytest.mark.asyncio
+async def test_medium_severity_breach():
+    tools = _make_stock_mock(70.0)  # 70 vs threshold 100 → 30% deficit → MEDIUM
+    watchlist = [{"material": "FG-001", "plant": "1010", "safety_stock_threshold": 100.0, "sla_date": "2026-07-15"}]
+    alerts = await watchlist_monitor(watchlist, mcp_tools=tools)
+    assert len(alerts) == 1
+    assert alerts[0]["breach_severity"] == "MEDIUM"
+
+
+@pytest.mark.asyncio
+async def test_low_severity_breach():
+    tools = _make_stock_mock(85.0)  # 85 vs threshold 100 → 15% deficit → LOW
+    watchlist = [{"material": "FG-001", "plant": "1010", "safety_stock_threshold": 100.0, "sla_date": "2026-07-15"}]
+    alerts = await watchlist_monitor(watchlist, mcp_tools=tools)
+    assert len(alerts) == 1
+    assert alerts[0]["breach_severity"] == "LOW"
+
+
+@pytest.mark.asyncio
+async def test_no_breach_returns_empty():
+    tools = _make_stock_mock(200.0)  # 200 > threshold 100 → no breach
+    watchlist = [{"material": "FG-001", "plant": "1010", "safety_stock_threshold": 100.0, "sla_date": "2026-07-15"}]
+    alerts = await watchlist_monitor(watchlist, mcp_tools=tools)
+    assert alerts == []
+
+
+@pytest.mark.asyncio
+async def test_multiple_entries_mixed():
+    async def mock_tool(**kwargs):
+        material = kwargs.get("Material", "FG-001")
+        stock = 200.0 if material == "FG-001" else 10.0
+        return {"value": [{"Material": material, "Plant": "1010", "StorageLocation": "0001",
+                           "MatlWrhsStkQtyInMatlBaseUnit": stock, "MaterialStockInTransferQty": 0.0,
+                           "MatlStkQtyInMatlBaseUnit": 0.0, "SafetyStock": 50.0, "MaterialBaseUnit": "EA"}]}
+    tools = {"API_MATERIAL_STOCK_SRV__A_MaterialStock_Read": mock_tool}
+    watchlist = [
+        {"material": "FG-001", "plant": "1010", "safety_stock_threshold": 100.0, "sla_date": "2026-07-15"},
+        {"material": "FG-002", "plant": "1010", "safety_stock_threshold": 100.0, "sla_date": "2026-07-15"},
+    ]
+    alerts = await watchlist_monitor(watchlist, mcp_tools=tools)
+    assert len(alerts) == 1
+    assert alerts[0]["material"] == "FG-002"
+
+
+@pytest.mark.asyncio
+async def test_empty_watchlist():
+    alerts = await watchlist_monitor([], mcp_tools=None)
+    assert alerts == []
