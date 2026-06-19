@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import time
+from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Any, Optional
 
@@ -31,12 +32,15 @@ from util import enhance_tool_description, enhance_tool_name, call_mcp_tool_with
 
 logger = logging.getLogger(__name__)
 
+# Context variable to pass user token from request to tool execution
+# This allows cached tools to access per-request user credentials
+_user_token_context: ContextVar[str | None] = ContextVar('user_token', default=None)
+
+# Reusable AGW client for connection pooling
+_agw_client: Optional[Any] = None
+
 # mcp-mock.json lives at the asset root (one level above app/)
 _MOCK_FILE = Path(__file__).parent.parent / "mcp-mock.json"
-
-# Tool cache for performance optimization
-_tool_cache: Optional[tuple[list, float]] = None
-_CACHE_TTL = float(os.environ.get("MCP_TOOL_CACHE_TTL", "60.0"))  # seconds
 
 
 def _build_mock_tools() -> list:
@@ -51,7 +55,11 @@ def _build_mock_tools() -> list:
     try:
         mock_data = json.loads(_MOCK_FILE.read_text())
     except Exception:
-        logger.warning("Failed to parse mcp-mock.json at %s — returning empty tool list", _MOCK_FILE, exc_info=True)
+        logger.warning(
+            "Failed to parse mcp-mock.json at %s — returning empty tool list",
+            _MOCK_FILE,
+            exc_info=True,
+        )
         return []
 
     tools = []
@@ -80,11 +88,23 @@ def _build_mock_tools() -> list:
                     python_type = str
 
                 if field_name in required_fields:
-                    field_definitions[field_name] = (python_type, Field(description=field_info.get("description", "")))
+                    field_definitions[field_name] = (
+                        python_type,
+                        Field(description=field_info.get("description", "")),
+                    )
                 else:
-                    field_definitions[field_name] = (python_type, Field(default=None, description=field_info.get("description", "")))
+                    field_definitions[field_name] = (
+                        python_type,
+                        Field(
+                            default=None, description=field_info.get("description", "")
+                        ),
+                    )
 
-            args_schema = create_model(f"{tool_name}_args", **field_definitions) if field_definitions else create_model(f"{tool_name}_args")
+            args_schema = (
+                create_model(f"{tool_name}_args", **field_definitions)
+                if field_definitions
+                else create_model(f"{tool_name}_args")
+            )
             _response = json.dumps(mock_response)
 
             async def _coroutine(_resp=_response, **kwargs) -> str:
@@ -123,13 +143,21 @@ def _convert_mcp_tool_to_langchain(mcp_tool: Any, agw_client: Any) -> Structured
         Uses the SDK's namespaced_name property (format: 'server_name__tool_name')
         to prevent naming conflicts when multiple MCP servers provide tools
         with the same name.
+
+        User authentication: The user token is retrieved from the context variable
+        _user_token_context at call time, allowing these cached tools to use
+        per-request credentials without being recreated for each user.
     """
     if mcp_tool is None:
         raise ValueError("mcp_tool parameter cannot be None")
 
     async def run(**kwargs) -> str:
-        """Execute the MCP tool via Agent Gateway client with retry logic."""
-        return await call_mcp_tool_with_retry(agw_client, mcp_tool, **kwargs)
+        """Execute the MCP tool via Agent Gateway client with retry logic.
+
+        Retrieves the user token from the context variable set by agent_executor.
+        """
+        user_token = _user_token_context.get()
+        return await call_mcp_tool_with_retry(agw_client, mcp_tool, user_token=user_token, **kwargs)
 
     # Build args schema from input_schema
     properties = mcp_tool.input_schema.get("properties", {})
@@ -167,63 +195,109 @@ def _convert_mcp_tool_to_langchain(mcp_tool: Any, agw_client: Any) -> Structured
     )
 
 
-async def get_mcp_tools(use_cache: bool = True) -> list:
-    """Return LangChain-compatible MCP tools with optional caching.
+async def get_mcp_tools(user_token: str) -> list:
+    """Return LangChain-compatible MCP tools.
 
     In local/test mode (IBD_TESTING=1): returns mock tools from mcp-mock.json.
     In production: uses Agent Gateway client directly from SDK to connect via mTLS.
 
+    IMPORTANT: Both tool listing and tool calling require user credentials.
+    The user_token parameter is passed explicitly to ensure it cannot be forgotten.
+
+    Note: Tools are fetched per-request since tool listings are user-specific.
+    Each user may have access to different tools based on their permissions.
+
     Args:
-        use_cache: If True, returns cached tools if available and not expired.
-                   Cache TTL is controlled by MCP_TOOL_CACHE_TTL env var (default: 60 seconds).
+        user_token: User authentication token (required) for listing and calling tools
 
     Returns:
-        List of LangChain StructuredTool objects
+        List of LangChain StructuredTool objects for the current user
+
+    Raises:
+        ValueError: If user_token is None or empty string
     """
-    global _tool_cache
+    global _agw_client
+
+    # Validate user_token is provided and non-empty
+    if not user_token:
+        raise ValueError("user_token is required for listing and calling MCP tools")
 
     if os.environ.get("IBD_TESTING") == "1":
         return _build_mock_tools()
 
-    # Check cache
-    if use_cache and _tool_cache is not None:
-        tools, cached_at = _tool_cache
-        age = time.time() - cached_at
-        if age < _CACHE_TTL:
-            logger.debug(f"Returning {len(tools)} cached MCP tools (age: {age:.1f}s, TTL: {_CACHE_TTL}s)")
-            return tools
-        else:
-            logger.debug(f"Tool cache expired (age: {age:.1f}s > TTL: {_CACHE_TTL}s), refreshing...")
-
     try:
-        # Create Agent Gateway client directly
-        agw_client = create_client()
-        logger.info("Agent Gateway client created successfully")
+        # Reuse AGW client for connection pooling (mTLS is expensive to establish)
+        if _agw_client is None:
+            _agw_client = create_client()
+            logger.info("Agent Gateway client created successfully")
 
-        # Get MCP tools from Agent Gateway
-        mcp_tools = await agw_client.list_mcp_tools()
+        agw_client = _agw_client
+
+        # Get MCP tools from Agent Gateway with user token
+        logger.info("Listing MCP tools with user credentials")
+        mcp_tools = await agw_client.list_mcp_tools(user_token=user_token)
 
         if not mcp_tools:
-            logger.warning("Agent Gateway returned 0 tools - MCP servers may not be available or have no tools")
-        else:
-            logger.info(f"Successfully retrieved {len(mcp_tools)} tool(s) from Agent Gateway: {[t.name for t in mcp_tools]}")
+            logger.warning("Agent Gateway returned 0 tools - MCP servers may not be available")
+            return []
 
-        # Convert to LangChain tools
-        langchain_tools = [_convert_mcp_tool_to_langchain(t, agw_client) for t in mcp_tools]
-        logger.info("Loaded %d MCP tool(s) from Agent Gateway", len(langchain_tools))
+        logger.info(f"Successfully retrieved {len(mcp_tools)} tool(s) from Agent Gateway")
 
-        # Cache the result
-        if use_cache:
-            _tool_cache = (langchain_tools, time.time())
-            logger.debug(f"Cached {len(langchain_tools)} tools with TTL={_CACHE_TTL}s")
+        # Convert to LangChain tools (they retrieve user token at call time from context)
+        langchain_tools = []
+        for mcp_tool in mcp_tools:
+            try:
+                langchain_tool = _convert_mcp_tool_to_langchain(mcp_tool, agw_client)
+                langchain_tools.append(langchain_tool)
+            except Exception as e:
+                logger.warning(f"Failed to convert tool '{mcp_tool.name}': {e}")
+                # Continue with other tools
 
         return langchain_tools
-    except Exception:
+
+    except Exception as e:
         logger.exception("Failed to load MCP tools from Agent Gateway")
-        # If cache exists and we failed to refresh, return stale cache
-        if use_cache and _tool_cache is not None:
-            tools, cached_at = _tool_cache
-            age = time.time() - cached_at
-            logger.warning(f"Returning stale cached tools (age: {age:.1f}s) after failure")
-            return tools
+        # Reset client on failure to force reconnection on next attempt
+        _agw_client = None
         return []
+
+def set_user_token_for_tools(user_token: str | None) -> Token:
+    """Set the user token for MCP tool calls in the current async context.
+
+    This must be called before invoking any tools to ensure they use the correct
+    user credentials. The token is stored in a context variable that is automatically
+    isolated per async task/request.
+
+    IMPORTANT: Always reset the token after use to prevent cross-request contamination:
+        token_ctx = set_user_token_for_tools(user_token)
+        try:
+            # ... use tools ...
+        finally:
+            reset_user_token_for_tools(token_ctx)
+
+    Args:
+        user_token: The user's authentication token, or None to clear it
+
+    Returns:
+        Token object that must be passed to reset_user_token_for_tools() to restore
+        the previous value
+    """
+    if user_token:
+        logger.debug("User token set for tool execution")
+    else:
+        logger.debug("User token cleared for tool execution")
+    return _user_token_context.set(user_token)
+
+
+def reset_user_token_for_tools(token: Token) -> None:
+    """Reset the user token in the current async context.
+
+    This should always be called in a finally block after set_user_token_for_tools()
+    to ensure proper credential lifecycle management and prevent token leakage across
+    async execution paths.
+
+    Args:
+        token: The Token object returned by set_user_token_for_tools()
+    """
+    _user_token_context.reset(token)
+    logger.debug("User token context reset to previous value")
