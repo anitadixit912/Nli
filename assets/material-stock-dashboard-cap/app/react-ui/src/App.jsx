@@ -7,6 +7,7 @@ import '@ui5/webcomponents-icons/dist/warning.js'
 import '@ui5/webcomponents-icons/dist/accept.js'
 import '@ui5/webcomponents-icons/dist/download.js'
 import '@ui5/webcomponents-icons/dist/filter.js'
+import '@ui5/webcomponents-icons/dist/locked.js'
 import './App.css'
 import ChatBox from './ChatBox.jsx'
 
@@ -25,13 +26,14 @@ const RISK_COLOR = {
 }
 
 export default function App() {
-  const [allStock, setAllStock]           = useState([])
-  const [loading, setLoading]             = useState(false)
-  const [error, setError]                 = useState(null)
-  const [safetyPct, setSafetyPct]         = useState(20)
-  const [pendingPct, setPendingPct]       = useState('20')
-  const [plantFilter, setPlantFilter]     = useState('ALL')
-  const [locFilter, setLocFilter]         = useState('ALL')
+  const [allStock, setAllStock]               = useState([])
+  const [loading, setLoading]                 = useState(false)
+  const [error, setError]                     = useState(null)
+  const [safetyPct, setSafetyPct]             = useState(20)
+  const [pendingPct, setPendingPct]           = useState('20')
+  const [plantFilter, setPlantFilter]         = useState('ALL')
+  const [locFilter, setLocFilter]             = useState('ALL')
+  const [showSecurityBanner, setShowSecurityBanner] = useState(true)
 
   // ── Fetch stock data ──────────────────────────────────────────────────────
   const fetchData = useCallback(async () => {
@@ -69,23 +71,33 @@ export default function App() {
   useEffect(() => { fetchData() }, [fetchData])
 
   // ── Apply threshold update ────────────────────────────────────────────────
+  // Uses the dedicated updateThreshold action — StockThresholdConfig entity
+  // is @readonly so direct PATCH is blocked; this action is the only write path.
   const applyThreshold = async () => {
     const newPct = Number(pendingPct)
-    if (isNaN(newPct) || newPct < 0 || newPct > 100) return
+    if (isNaN(newPct) || newPct < 0 || newPct > 100) {
+      setError('Threshold must be a number between 0 and 100.')
+      return
+    }
     try {
-      const patchRes = await fetch('/stock/StockThresholdConfig(1)', {
-        method: 'PATCH',
+      const res = await fetch('/stock/updateThreshold', {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ safetyStockPct: newPct }),
       })
-      if (patchRes.status === 401 || patchRes.status === 403) {
+      if (res.status === 401 || res.status === 403) {
         setError('Session expired or unauthorized. Please refresh the page and log in again.')
+        return
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        setError(body?.error?.message || 'Failed to update threshold.')
         return
       }
       setSafetyPct(newPct)
       await fetchData()
     } catch (e) {
-      setError('Failed to update threshold: ' + e.message)
+      setError('Failed to update threshold.')
     }
   }
 
@@ -187,6 +199,21 @@ export default function App() {
       </ShellBar>
 
       <div className="dashboard-root">
+        {/* ── Security Compliance Banner ─────────────────────────── */}
+        {showSecurityBanner && (
+          <MessageStrip
+            design="Positive"
+            onClose={() => setShowSecurityBanner(false)}
+            style={{ marginBottom: '0.75rem' }}
+          >
+            🔒 <strong>Security Compliance Active (v1.7.0)</strong> — Authentication required on all endpoints &nbsp;·&nbsp;
+            Threshold updates via controlled action only &nbsp;·&nbsp;
+            Chat input limited to 1,000 characters &nbsp;·&nbsp;
+            RiskDescription field schema-declared &nbsp;·&nbsp;
+            Mock data fallback warnings enabled
+          </MessageStrip>
+        )}
+
         {/* ── Error Banner ───────────────────────────────────────── */}
         {error && (
           <MessageStrip design="Negative" onClose={() => setError(null)} style={{ marginBottom: '1rem' }}>
