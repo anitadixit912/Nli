@@ -1,113 +1,104 @@
-"""Tool: propose_corrective_actions — simulates and ranks corrective options for a shortfall."""
-import logging
-from typing import Any
+"""Tool 5: Propose Corrective Actions — R-04 Simulate and Rank Options.
 
-from langchain_core.tools import tool
-from opentelemetry import trace
+Derives and ranks up to 4 corrective options based on supply/demand context.
+"""
+
+import logging
+from datetime import datetime, timezone
+
+from tools.get_planned_orders import get_planned_orders
+from tools.get_demand_elements import get_demand_elements
 
 logger = logging.getLogger(__name__)
-tracer = trace.get_tracer(__name__)
 
 
-@tool
 async def propose_corrective_actions(
     material: str,
     plant: str,
     shortfall_quantity: float,
     required_date: str,
-) -> dict[str, Any]:
-    """Simulate and rank corrective alternatives for a stock shortfall.
-    Options include planned order conversion, inter-plant STO, PIR adjustment,
-    and partial fulfillment. Ranked by ascending estimated lead days.
+    mcp_tools: dict = None,
+) -> dict:
+    """Simulate and rank corrective action options for a supply shortfall.
 
     Args:
-        material: SAP material number (e.g. 'FG-001')
-        plant: SAP plant code (e.g. '1010')
-        shortfall_quantity: Unfulfilled quantity needing coverage (e.g. 25.0)
-        required_date: Date by which the shortfall must be resolved (ISO, e.g. '2026-06-10')
+        material: SAP material number
+        plant: SAP plant code
+        shortfall_quantity: Unfulfilled quantity to cover
+        required_date: Required fulfillment date (YYYY-MM-DD)
+        mcp_tools: Dict mapping tool name -> callable
 
     Returns:
-        dict with ranked list of corrective options, each requiring human approval.
+        Structured dict with ranked options list.
     """
-    with tracer.start_as_current_span("tool.propose_corrective_actions") as span:
-        span.set_attribute("material", material)
-        span.set_attribute("plant", plant)
-        span.set_attribute("shortfall_quantity", shortfall_quantity)
-        span.set_attribute("required_date", required_date)
+    try:
+        planned = await get_planned_orders(material, plant, mcp_tools=mcp_tools)
+        demand = await get_demand_elements(material, plant, mcp_tools=mcp_tools)
 
-        if not material or not plant or shortfall_quantity <= 0 or not required_date:
-            logger.warning(
-                "M4.missed: options_not_simulated | material=%s reason=invalid_input "
-                "— ranked options not generated",
-                material,
-            )
-            return {
-                "error": "INVALID_INPUT",
-                "message": "material, plant, shortfall_quantity > 0, and required_date are required.",
-            }
+        orders = planned.get("planned_orders", [])
+        options = []
 
-        # Build ranked corrective options
-        options = [
-            {
+        # Option A — Planned Order Conversion
+        eligible = [o for o in orders if o.get("conversion_eligible") and o.get("quantity", 0) > 0]
+        if eligible:
+            best = eligible[0]
+            end_date = best.get("basic_end_date", required_date)
+            lead_days = _days_between(required_date, end_date)
+            options.append({
                 "rank": 1,
-                "type": "PARTIAL_FULFILLMENT",
-                "description": (
-                    "Ship confirmed quantity immediately; create backorder for remainder."
-                ),
+                "type": "PLANNED_ORDER_CONVERSION",
+                "description": f"Convert planned order {best['planned_order']} ({best['quantity']} {material}) to a production/process order.",
+                "estimated_lead_days": max(0, lead_days),
+                "quantity_covered": min(best["quantity"], shortfall_quantity),
+                "trade_offs": "Requires production capacity; lead time depends on basic end date.",
+                "requires_approval": True,
+            })
+
+        # Option B — Stock Transport Order
+        options.append({
+            "rank": 2,
+            "type": "STOCK_TRANSPORT_ORDER",
+            "description": f"Create a Stock Transport Order to transfer {shortfall_quantity} {material} from a supplying plant.",
+            "estimated_lead_days": 3,
+            "quantity_covered": shortfall_quantity,
+            "trade_offs": "Requires available stock at supplying plant and transport lane setup.",
+            "requires_approval": True,
+        })
+
+        # Option C — PIR Adjustment
+        demand_items = demand.get("demand_elements", [])
+        pir_items = [d for d in demand_items if "PIR" in d.get("type", "") or "IndReq" in d.get("type", "")]
+        if pir_items:
+            options.append({
+                "rank": 3,
+                "type": "PIR_ADJUSTMENT",
+                "description": f"Reduce lower-priority planned independent requirements to free {shortfall_quantity} units of supply.",
                 "estimated_lead_days": 0,
                 "quantity_covered": shortfall_quantity,
-                "trade_offs": "Customer receives partial shipment; remainder delayed.",
+                "trade_offs": "Reduces planned demand; may affect future forecast accuracy.",
                 "requires_approval": True,
-            },
-            {
-                "rank": 2,
-                "type": "PLANNED_ORDER_CONVERSION",
-                "description": (
-                    "Convert an open planned order to a production or purchase order "
-                    "to cover the shortfall."
-                ),
-                "estimated_lead_days": 3,
-                "quantity_covered": shortfall_quantity,
-                "trade_offs": "Requires production/procurement capacity; 3-day lead time.",
-                "requires_approval": True,
-            },
-            {
-                "rank": 3,
-                "type": "STOCK_TRANSPORT_ORDER",
-                "description": (
-                    "Transfer stock from an alternative plant via Stock Transport Order."
-                ),
-                "estimated_lead_days": 5,
-                "quantity_covered": shortfall_quantity,
-                "trade_offs": "Depends on stock availability at supplying plant; transit time.",
-                "requires_approval": True,
-            },
-            {
-                "rank": 4,
-                "type": "PIR_ADJUSTMENT",
-                "description": (
-                    "Reduce a lower-priority Planned Independent Requirement to free supply "
-                    "for this demand."
-                ),
-                "estimated_lead_days": 1,
-                "quantity_covered": shortfall_quantity,
-                "trade_offs": "Impacts forecast accuracy; reduces planned supply for other demand.",
-                "requires_approval": True,
-            },
-        ]
+            })
 
-        # Sort by ascending estimated lead days and re-assign ranks
-        options.sort(key=lambda o: o["estimated_lead_days"])
-        for idx, option in enumerate(options, start=1):
-            option["rank"] = idx
+        # Option D — Partial Fulfillment
+        options.append({
+            "rank": len(options) + 1,
+            "type": "PARTIAL_FULFILLMENT",
+            "description": f"Fulfill available confirmed quantity now; backorder remaining {shortfall_quantity} units.",
+            "estimated_lead_days": 7,
+            "quantity_covered": shortfall_quantity,
+            "trade_offs": "Customer receives partial delivery; remaining qty fulfilled on next available date.",
+            "requires_approval": True,
+        })
 
+        # Sort by lead days
+        options.sort(key=lambda x: x["estimated_lead_days"])
+        for i, opt in enumerate(options, 1):
+            opt["rank"] = i
+
+        top = options[0] if options else {}
         logger.info(
-            "M4.achieved: options_simulated | material=%s options_count=%d "
-            "top_option=%s estimated_lead_days=%d",
-            material,
-            len(options),
-            options[0]["type"],
-            options[0]["estimated_lead_days"],
+            "M4.achieved: options_simulated | material=%s options_count=%d top_option=%s estimated_lead_days=%d",
+            material, len(options), top.get("type", "N/A"), top.get("estimated_lead_days", 0),
         )
         return {
             "material": material,
@@ -115,8 +106,27 @@ async def propose_corrective_actions(
             "shortfall_quantity": shortfall_quantity,
             "required_date": required_date,
             "options": options,
-            "note": (
-                "All options require explicit human approval before execution. "
-                "Lead day estimates are indicative; actual times depend on live S/4HANA data."
-            ),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+    except Exception as exc:
+        logger.warning(
+            "M4.missed: options_not_simulated | material=%s reason=%s — ranked options not generated",
+            material, str(exc),
+        )
+        return {
+            "error": True,
+            "error_code": "OPTIONS_SIMULATION_FAILED",
+            "error_reason": str(exc),
+            "material": material,
+            "plant": plant,
+        }
+
+
+def _days_between(date_a: str, date_b: str) -> int:
+    """Return days from date_a to date_b. Negative if date_b is earlier."""
+    try:
+        from datetime import datetime
+        fmt = "%Y-%m-%d"
+        return (datetime.strptime(date_b, fmt) - datetime.strptime(date_a, fmt)).days
+    except Exception:
+        return 5
