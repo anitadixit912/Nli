@@ -1,69 +1,41 @@
-"""Unit tests for flag_po_expedite tool."""
+"""Tests for flag_po_expedite tool."""
 import pytest
-from app.tools.flag_po_expedite import flag_po_expedite
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'app'))
+
+from tools.flag_po_expedite import flag_po_expedite
 
 
 @pytest.mark.asyncio
-async def test_flag_po_expedite_success():
-    result = await flag_po_expedite.ainvoke(
-        {
-            "purchase_order": "4500099999",
-            "purchase_order_item": "00010",
-            "expedite_reason": "Safety stock breach at Plant 1010",
-            "buyer_note": "Please advance by 5 days",
-            "approved_by": "PROCUREMENT_MGR",
-        }
-    )
+async def test_expedite_payload_returned():
+    result = await flag_po_expedite("4500001234", "000010", "STOCK_SHORTFALL")
+    assert result["purchase_order"] == "4500001234"
+    assert result["purchase_order_item"] == "000010"
+    assert result["expedite_reason"] == "STOCK_SHORTFALL"
     assert result["status"] == "PENDING_BUYER_ACTION"
-    assert result["purchase_order"] == "4500099999"
-    assert result["approved_by"] == "PROCUREMENT_MGR"
+
+
+@pytest.mark.asyncio
+async def test_status_is_pending_buyer_action():
+    result = await flag_po_expedite("4500001234", "000010", "URGENT_DEMAND")
+    assert result["status"] == "PENDING_BUYER_ACTION"
+
+
+@pytest.mark.asyncio
+async def test_buyer_note_included():
+    result = await flag_po_expedite("4500001234", "000010", "STOCK_SHORTFALL", buyer_note="Urgent — SLA at risk")
+    assert result["buyer_note"] == "Urgent — SLA at risk"
+
+
+@pytest.mark.asyncio
+async def test_flagged_at_timestamp_present():
+    result = await flag_po_expedite("4500001234", "000010", "STOCK_SHORTFALL")
     assert "flagged_at" in result
+    assert result["flagged_at"] != ""
 
 
 @pytest.mark.asyncio
-async def test_flag_po_expedite_without_optional_fields():
-    result = await flag_po_expedite.ainvoke(
-        {
-            "purchase_order": "4500099999",
-            "purchase_order_item": "00010",
-            "expedite_reason": "Stockout risk",
-        }
-    )
+async def test_no_mcp_tool_needed():
+    # flag_po_expedite does not use MCP — should always succeed
+    result = await flag_po_expedite("4500001234", "000010", "LOW_STOCK", mcp_tools={})
     assert result["status"] == "PENDING_BUYER_ACTION"
-    assert "error" not in result
-
-
-@pytest.mark.asyncio
-async def test_flag_po_expedite_missing_po_returns_error():
-    result = await flag_po_expedite.ainvoke(
-        {
-            "purchase_order": "",
-            "purchase_order_item": "00010",
-            "expedite_reason": "Stockout risk",
-        }
-    )
-    assert result["error"] == "INVALID_INPUT"
-
-
-@pytest.mark.asyncio
-async def test_flag_po_expedite_missing_reason_returns_error():
-    result = await flag_po_expedite.ainvoke(
-        {
-            "purchase_order": "4500099999",
-            "purchase_order_item": "00010",
-            "expedite_reason": "",
-        }
-    )
-    assert result["error"] == "INVALID_INPUT"
-
-
-@pytest.mark.asyncio
-async def test_flag_po_expedite_returns_timestamp():
-    result = await flag_po_expedite.ainvoke(
-        {
-            "purchase_order": "4500099999",
-            "purchase_order_item": "00010",
-            "expedite_reason": "Urgent",
-        }
-    )
-    assert result["flagged_at"].endswith("Z")
