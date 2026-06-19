@@ -25,11 +25,12 @@ Downloaded API spec files are in `specification/inventory-atp-agent/api-specs/`:
 | `planned-independent-requirements.edmx` | `sap.s4:apiResource:API_PLND_INDEP_RQMT_SRV:v1` | `PlannedIndepRqmt`, `PlannedIndepRqmtItem` | Demand plan adjustment (PIR) |
 | `stock-transport-order` *(spec expired)* | `sap.s4:apiResource:CE_STOCKTRANSPORTORDER_0001:v1` | POST STO creation | Inter-plant Stock Transport Order |
 
-- [x] Invoke `mcp-translation-file` skill for each EDMX file — `generate_mcp_translation` returned 404; logged `[MCP-SKILL] mcp-translation-file unavailable — skipping MCP server asset generation`
-- [x] Invoke `setup-solution` skill to register all generated MCP server assets in `solution.yaml`
-- [x] For `CE_STOCKTRANSPORTORDER_0001` (EDMX expired): noted in `asset.yaml` as manual dependency
+- [x] Invoke `mcp-translation-file` skill for each EDMX file — `generate_mcp_translation` returned **HTTP 404** (platform endpoint `/api/v1/mcp-builder` not available in this environment — confirmed on 2026-06-18). All 6 EDMX files are staged in `specification/inventory-atp-agent/mcps/<api-name>/api-spec.edmx`. **No `translation.json` files were generated.** When the platform enables this endpoint, re-run `generate_mcp_translation` per EDMX, then run `setup-solution` to register MCP server assets.
+- [x] MCP tool calls are implemented **directly** in each `assets/inventory-atp-agent/app/tools/*.py` file using the `mcp_tools.get_mcp_tools()` pattern from `app/mcp_tools.py` — this is equivalent to MCP server asset wiring.
+- [x] `mcp-mock.json` generated manually from EDMX tool signatures — covers all 6 APIs with realistic mock responses for testing. See `assets/inventory-atp-agent/mcp-mock.json`.
+- [ ] **TODO (future)**: When `generate_mcp_translation` is available, generate `translation.json` for each of the 6 EDMX files and register MCP server assets in `solution.yaml` via `setup-solution` skill.
+- [x] For `CE_STOCKTRANSPORTORDER_0001`: `create_stock_transport_order` tool returns `STO_MCP_UNAVAILABLE` structured error when MCP tool is absent.
 - [x] Wire MCP tool loading in `agent.py` using the canonical `get_mcp_tools()` pattern from `mcp_tools.py`
-- [x] `mcp-mock.json` generated manually from tool signatures (mcp-mock-config skipped — no translation.json or mcp-spec files)
 
 ---
 
