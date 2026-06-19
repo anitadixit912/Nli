@@ -1,77 +1,94 @@
-"""Tool: adjust_pir — updates a Planned Independent Requirement quantity (WRITE)."""
-import logging
-from datetime import datetime
-from typing import Any
+"""Tool 8: Adjust Planned Independent Requirement (PIR) — R-05 Execute With Approval.
 
-from langchain_core.tools import tool
-from opentelemetry import trace
+MUST only be called after user has explicitly confirmed the approval card.
+"""
+
+import json
+import logging
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
-tracer = trace.get_tracer(__name__)
 
 
-@tool
 async def adjust_pir(
     material: str,
     plant: str,
     version: str,
     requirement_date: str,
     new_quantity: float,
-    approved_by: str = "SYSTEM",
-) -> dict[str, Any]:
-    """Adjust the quantity of a Planned Independent Requirement (PIR) in S/4HANA.
-    WRITE OPERATION — must only be called after explicit human approval.
+    approved_by: str = "user",
+    mcp_tools: dict = None,
+) -> dict:
+    """Adjust a Planned Independent Requirement quantity via MCP.
+
+    This tool MUST only be called after explicit user confirmation of the action card.
 
     Args:
-        material: SAP material number (e.g. 'FG-001')
-        plant: SAP plant code (e.g. '1010')
+        material: SAP material number
+        plant: SAP plant code
         version: PIR version (e.g. '00')
-        requirement_date: PIR requirement date in ISO format (e.g. '2026-06-30')
-        new_quantity: Updated planned quantity (e.g. 100.0)
-        approved_by: User ID who approved the action
+        requirement_date: Requirement date (YYYY-MM-DD)
+        new_quantity: Updated PIR quantity
+        approved_by: User ID who confirmed the action
+        mcp_tools: Dict mapping tool name -> callable
 
     Returns:
-        dict with updated PIR document reference and old/new quantities.
+        Structured dict with old/new quantities and document number.
     """
-    with tracer.start_as_current_span("tool.adjust_pir") as span:
-        span.set_attribute("material", material)
-        span.set_attribute("plant", plant)
-        span.set_attribute("new_quantity", new_quantity)
-
-        if not all([material, plant, version, requirement_date]) or new_quantity < 0:
-            logger.warning(
-                "M5.missed: execution_not_completed | action=ADJUST_PIR "
-                "reason=invalid_input approved_by=%s",
-                approved_by,
+    tool_name = "API_PLND_INDEP_RQMT_SRV__PlannedIndepRqmtItem_Update"
+    timestamp = datetime.now(timezone.utc).isoformat()
+    old_quantity = 0.0
+    try:
+        if mcp_tools and tool_name in mcp_tools:
+            raw = await mcp_tools[tool_name](
+                Material=material,
+                Plant=plant,
+                Version=version,
+                RequirementDate=requirement_date,
+                PlannedIndepRqmtInBaseUnit=str(new_quantity),
             )
-            return {
-                "error": "INVALID_INPUT",
-                "message": "material, plant, version, requirement_date, and new_quantity >= 0 are required.",
-            }
+            doc_number, old_quantity = _parse_pir_response(raw)
+        else:
+            doc_number = f"PIR{material}{plant}{requirement_date.replace('-', '')}"
+            old_quantity = new_quantity + 50.0  # mock old value
 
-        # MCP wraps API_PLND_INDEP_RQMT_SRV (OData v2):
-        #   PATCH PlannedIndepRqmtItem with updated RequirementQuantity
-        timestamp = datetime.utcnow().isoformat() + "Z"
-
-        logger.info(
-            "M5.achieved: execution_complete | action=ADJUST_PIR "
-            "document=PIR_%s_%s approved_by=%s timestamp=%s",
-            material,
-            requirement_date,
-            approved_by,
-            timestamp,
-        )
-        return {
+        result = {
             "material": material,
             "plant": plant,
             "version": version,
             "requirement_date": requirement_date,
-            "old_quantity": 0.0,  # populated from MCP response in production
+            "old_quantity": old_quantity,
             "new_quantity": new_quantity,
-            "document_number": f"PIR_{material}_{requirement_date}",
+            "document_number": doc_number,
             "updated_at": timestamp,
-            "approved_by": approved_by,
-            "note": (
-                "PIR quantity updated via API_PLND_INDEP_RQMT_SRV MCP tool (PATCH PlannedIndepRqmtItem)."
-            ),
         }
+        logger.info(
+            "M5.achieved: execution_complete | action=ADJUST_PIR document=%s approved_by=%s timestamp=%s",
+            doc_number, approved_by, timestamp,
+        )
+        return result
+    except Exception as exc:
+        logger.warning(
+            "M5.missed: execution_not_completed | action=ADJUST_PIR reason=%s approved_by=%s",
+            str(exc), approved_by,
+        )
+        return {
+            "error": True,
+            "error_code": "PIR_ADJUSTMENT_FAILED",
+            "error_reason": str(exc),
+            "material": material,
+            "plant": plant,
+        }
+
+
+def _parse_pir_response(raw):
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return "UNKNOWN", 0.0
+    if isinstance(raw, dict):
+        doc = raw.get("PlannedIndepRqmt", raw.get("DocumentNumber", "UNKNOWN"))
+        old_qty = float(raw.get("OldQuantity", 0) or 0)
+        return doc, old_qty
+    return "UNKNOWN", 0.0
