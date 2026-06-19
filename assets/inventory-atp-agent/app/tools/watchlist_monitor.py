@@ -1,75 +1,53 @@
-"""Watchlist monitor — evaluates stock breach severity for Protect_Service_Level sub-intent."""
-import logging
-from typing import Any
+"""Watchlist Monitor — R-03 Protect Service Level.
 
-from opentelemetry import trace
+Monitors a list of material/plant entries against safety stock thresholds
+and returns structured breach alerts.
+"""
+
+import logging
+
+from tools.get_material_stock import get_material_stock
 
 logger = logging.getLogger(__name__)
-tracer = trace.get_tracer(__name__)
 
 
-def compute_breach_severity(current_stock: float, threshold: float) -> str:
-    """Classify safety stock breach severity based on how far below threshold."""
-    if current_stock <= 0:
-        return "HIGH"
-    ratio = current_stock / threshold if threshold > 0 else 1.0
-    if ratio < 0.25:
-        return "HIGH"
-    if ratio < 0.75:
-        return "MEDIUM"
-    return "LOW"
-
-
-@tracer.start_as_current_span("watchlist_monitor.check_entries")
-async def check_watchlist(
-    entries: list[dict[str, Any]],
-    stock_fetcher: Any,
-) -> list[dict[str, Any]]:
-    """Evaluate a list of watchlist entries against live stock data.
+async def watchlist_monitor(
+    watchlist: list,
+    mcp_tools: dict = None,
+) -> list:
+    """Monitor materials against safety stock thresholds.
 
     Args:
-        entries: List of dicts with keys: material, plant, safety_stock_threshold, sla_date
-        stock_fetcher: Async callable matching get_material_stock signature (injected for testability)
+        watchlist: List of dicts with keys:
+            - material (str)
+            - plant (str)
+            - safety_stock_threshold (float)
+            - sla_date (str, YYYY-MM-DD)
+        mcp_tools: Dict mapping tool name -> callable
 
     Returns:
-        List of alert dicts for entries that breached their threshold.
+        List of alert dicts for materials in breach.
     """
-    alerts: list[dict[str, Any]] = []
-
-    for entry in entries:
+    alerts = []
+    for entry in watchlist:
         material = entry.get("material", "")
         plant = entry.get("plant", "")
         threshold = float(entry.get("safety_stock_threshold", 0))
         sla_date = entry.get("sla_date", "")
-
-        if not material or not plant:
-            logger.warning("Skipping watchlist entry with missing material or plant: %s", entry)
-            continue
-
         try:
-            stock_data = await stock_fetcher(material=material, plant=plant)
-
-            if "error" in stock_data:
-                logger.warning(
-                    "M1.missed: stock_perception_failed | material=%s plant=%s "
-                    "error=%s — perception step did not complete",
-                    material,
-                    plant,
-                    stock_data.get("error"),
-                )
+            stock_data = await get_material_stock(material, plant, mcp_tools=mcp_tools)
+            if stock_data.get("error"):
                 continue
-
             current_stock = float(stock_data.get("unrestricted_stock", 0))
-            logger.info(
-                "M1.achieved: stock_perception_complete | material=%s plant=%s sloc=ALL "
-                "stock_categories=4 demand_elements=0",
-                material,
-                plant,
-            )
-
             if current_stock < threshold:
-                severity = compute_breach_severity(current_stock, threshold)
-                alert = {
+                deficit_pct = ((threshold - current_stock) / threshold * 100) if threshold > 0 else 100
+                if deficit_pct >= 50:
+                    severity = "HIGH"
+                elif deficit_pct >= 20:
+                    severity = "MEDIUM"
+                else:
+                    severity = "LOW"
+                alerts.append({
                     "alert_type": "SAFETY_STOCK_BREACH",
                     "material": material,
                     "plant": plant,
@@ -77,29 +55,12 @@ async def check_watchlist(
                     "threshold": threshold,
                     "sla_date": sla_date,
                     "breach_severity": severity,
-                    "message": (
-                        f"Safety stock breach detected for {material} at plant {plant}. "
-                        f"Current stock {current_stock} is below threshold {threshold} "
-                        f"(Severity: {severity})."
-                    ),
-                }
-                alerts.append(alert)
+                    "deficit_pct": round(deficit_pct, 1),
+                })
                 logger.warning(
-                    "Safety stock breach: material=%s plant=%s current=%.2f threshold=%.2f severity=%s",
-                    material,
-                    plant,
-                    current_stock,
-                    threshold,
-                    severity,
+                    "Safety stock breach | material=%s plant=%s current=%.1f threshold=%.1f severity=%s",
+                    material, plant, current_stock, threshold, severity,
                 )
-
         except Exception as exc:
-            logger.error(
-                "M1.missed: stock_perception_failed | material=%s plant=%s "
-                "error=%s — perception step did not complete",
-                material,
-                plant,
-                str(exc),
-            )
-
+            logger.warning("watchlist_monitor error | material=%s plant=%s error=%s", material, plant, str(exc))
     return alerts
