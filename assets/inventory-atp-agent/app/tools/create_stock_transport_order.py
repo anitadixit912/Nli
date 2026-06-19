@@ -1,16 +1,15 @@
-"""Tool: create_stock_transport_order — creates an STO in S/4HANA (WRITE — requires approval)."""
-import logging
-from datetime import datetime
-from typing import Any
+"""Tool 6: Create Stock Transport Order — R-05 Execute With Approval (STO Write).
 
-from langchain_core.tools import tool
-from opentelemetry import trace
+MUST only be called after user has explicitly confirmed the approval card.
+"""
+
+import json
+import logging
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
-tracer = trace.get_tracer(__name__)
 
 
-@tool
 async def create_stock_transport_order(
     material: str,
     supplying_plant: str,
@@ -18,63 +17,83 @@ async def create_stock_transport_order(
     quantity: float,
     unit: str,
     delivery_date: str,
-    approved_by: str = "SYSTEM",
-) -> dict[str, Any]:
-    """Create a Stock Transport Order (STO) between two plants in S/4HANA.
-    WRITE OPERATION — must only be called after explicit human approval.
+    approved_by: str = "user",
+    mcp_tools: dict = None,
+) -> dict:
+    """Create a Stock Transport Order in S/4HANA via MCP.
+
+    This tool MUST only be called after explicit user confirmation of the action card.
 
     Args:
-        material: SAP material number (e.g. 'FG-001')
-        supplying_plant: Plant providing the stock (e.g. '1020')
-        receiving_plant: Plant receiving the stock (e.g. '1010')
-        quantity: Transfer quantity (e.g. 50.0)
-        unit: Unit of measure (e.g. 'EA')
-        delivery_date: Required delivery date in ISO format (e.g. '2026-06-15')
-        approved_by: User ID who approved the action
+        material: SAP material number
+        supplying_plant: Supplying plant code
+        receiving_plant: Receiving plant code
+        quantity: Transfer quantity
+        unit: Unit of measure
+        delivery_date: Required delivery date (YYYY-MM-DD)
+        approved_by: User ID who confirmed the action
+        mcp_tools: Dict mapping tool name -> callable
 
     Returns:
-        dict with STO document number and status, or error if MCP tool unavailable.
+        Structured dict with STO document number or error.
     """
-    with tracer.start_as_current_span("tool.create_stock_transport_order") as span:
-        span.set_attribute("material", material)
-        span.set_attribute("supplying_plant", supplying_plant)
-        span.set_attribute("receiving_plant", receiving_plant)
-        span.set_attribute("quantity", quantity)
-
-        if not all([material, supplying_plant, receiving_plant, unit, delivery_date]) or quantity <= 0:
+    tool_name = "CE_STOCKTRANSPORTORDER_0001__Create"
+    timestamp = datetime.now(timezone.utc).isoformat()
+    try:
+        if mcp_tools and tool_name in mcp_tools:
+            raw = await mcp_tools[tool_name](
+                Material=material,
+                SupplyingPlant=supplying_plant,
+                ReceivingPlant=receiving_plant,
+                Quantity=str(quantity),
+                BaseUnit=unit,
+                DeliveryDate=delivery_date,
+            )
+            doc_number = _parse_doc_number(raw)
+            result = {
+                "sto_document_number": doc_number,
+                "material": material,
+                "supplying_plant": supplying_plant,
+                "receiving_plant": receiving_plant,
+                "quantity": quantity,
+                "unit": unit,
+                "delivery_date": delivery_date,
+                "status": "CREATED",
+                "created_at": timestamp,
+            }
+            logger.info(
+                "M5.achieved: execution_complete | action=CREATE_STO document=%s approved_by=%s timestamp=%s",
+                doc_number, approved_by, timestamp,
+            )
+            return result
+        else:
+            # MCP tool not yet available
             logger.warning(
-                "M5.missed: execution_not_completed | action=CREATE_STO "
-                "reason=invalid_input approved_by=%s",
+                "M5.missed: execution_not_completed | action=CREATE_STO reason=STO_MCP_UNAVAILABLE approved_by=%s",
                 approved_by,
             )
             return {
-                "error": "INVALID_INPUT",
-                "message": "All fields are required and quantity must be > 0.",
+                "error": "STO_MCP_UNAVAILABLE",
+                "message": "Stock Transport Order MCP tool not yet configured. Please re-fetch CE_STOCKTRANSPORTORDER_0001 spec.",
             }
-
-        # MCP wraps CE_STOCKTRANSPORTORDER_0001 (CE OData v4):
-        #   POST to create STO entity
-        #   NOTE: MCP spec may require re-fetch if CE_STOCKTRANSPORTORDER_0001 EDMX expired.
-        timestamp = datetime.utcnow().isoformat() + "Z"
-        logger.info(
-            "M5.achieved: execution_complete | action=CREATE_STO document=STO_PENDING "
-            "approved_by=%s timestamp=%s",
-            approved_by,
-            timestamp,
+    except Exception as exc:
+        logger.warning(
+            "M5.missed: execution_not_completed | action=CREATE_STO reason=%s approved_by=%s",
+            str(exc), approved_by,
         )
         return {
-            "sto_document_number": "STO_PENDING",
-            "material": material,
-            "supplying_plant": supplying_plant,
-            "receiving_plant": receiving_plant,
-            "quantity": quantity,
-            "unit": unit,
-            "delivery_date": delivery_date,
-            "status": "CREATED",
-            "created_at": timestamp,
-            "approved_by": approved_by,
-            "note": (
-                "STO creation dispatched via CE_STOCKTRANSPORTORDER_0001 MCP tool. "
-                "Verify document number in S/4HANA after confirmation."
-            ),
+            "error": True,
+            "error_code": "STO_CREATE_FAILED",
+            "error_reason": str(exc),
         }
+
+
+def _parse_doc_number(raw):
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return "UNKNOWN"
+    if isinstance(raw, dict):
+        return raw.get("StockTransportOrder", raw.get("DocumentNumber", "UNKNOWN"))
+    return "UNKNOWN"
