@@ -58,7 +58,7 @@ def enhance_tool_description(mcp_tool: Any) -> str:
         return ""
 
     # Extract server label from fragment_name or use server_name as fallback
-    server_label = getattr(mcp_tool, 'fragment_name', mcp_tool.server_name)
+    server_label = getattr(mcp_tool, "fragment_name", mcp_tool.server_name)
     enhanced_description = f"[{server_label}] {mcp_tool.description or ''}".strip()
 
     return enhanced_description
@@ -98,7 +98,7 @@ def enhance_tool_name(mcp_tool: Any) -> str:
     tool_name = mcp_tool.name
 
     # Step 1: Split server_name by ':'
-    segments = server_name.split(':')
+    segments = server_name.split(":")
 
     # Step 2: If more than 2 segments, drop the first two (org + type), keep the rest
     if len(segments) > 2:
@@ -107,7 +107,7 @@ def enhance_tool_name(mcp_tool: Any) -> str:
         remaining = segments
 
     # Step 3: Build {remaining}__{tool_name}, joining remaining segments with underscores
-    server_part = '_'.join(remaining)
+    server_part = "_".join(remaining)
     raw = f"{server_part}__{tool_name}"
 
     # Step 4: Sanitize (replace invalid chars with _)
@@ -120,13 +120,14 @@ def enhance_tool_name(mcp_tool: Any) -> str:
     return f"{sanitized[:55]}_{suffix}"
 
 
-async def call_mcp_tool_with_retry(agw_client: Any, mcp_tool: Any, **kwargs: Any) -> str:
+async def call_mcp_tool_with_retry(agw_client: Any, mcp_tool: Any, user_token: str | None = None, **kwargs: Any) -> str:
     """
     Call an MCP tool with retry logic and error handling.
 
     Args:
         agw_client: Agent Gateway client instance
         mcp_tool: The tool to call (MCPTool object from SDK)
+        user_token: User authentication token to pass to MCP server for tool execution
         **kwargs: Tool arguments
 
     Returns:
@@ -147,25 +148,34 @@ async def call_mcp_tool_with_retry(agw_client: Any, mcp_tool: Any, **kwargs: Any
         try:
             # Log tool name but sanitize arguments to avoid exposing sensitive data
             arg_keys = list(kwargs.keys()) if kwargs else []
-            logger.info(f"Calling MCP tool '{mcp_tool.name}' via Agent Gateway with {len(arg_keys)} argument(s)")
-            logger.debug(f"call_mcp_tool_with_retry: Initiating SDK call to Agent Gateway for {mcp_tool.name}")
+            logger.info(
+                f"Calling MCP tool '{mcp_tool.name}' via Agent Gateway with {len(arg_keys)} argument(s)"
+            )
+            logger.debug(
+                f"call_mcp_tool_with_retry: Initiating SDK call to Agent Gateway for {mcp_tool.name}"
+            )
 
             # Capture result outside potential ExceptionGroup handling
             _call_result = None
             try:
-                _call_result = await agw_client.call_mcp_tool(
-                    tool=mcp_tool,
-                    **kwargs,
-                    # TODO: Add user token support when authentication is available
-                    # user_token=user_token,
+                # Build call parameters
+                call_params = {"tool": mcp_tool, **kwargs}
+
+                if user_token is not None:
+                    call_params["user_token"] = user_token
+
+                _call_result = await agw_client.call_mcp_tool(**call_params)
+                logger.debug(
+                    f"call_mcp_tool_with_retry: SDK call completed for {mcp_tool.name}"
                 )
-                logger.debug(f"call_mcp_tool_with_retry: SDK call completed for {mcp_tool.name}")
             except (ExceptionGroup, BaseExceptionGroup) as eg:
                 # The MCP server may close the connection after sending the response;
                 # anyio wraps that teardown race in an ExceptionGroup.
                 # If we already captured a result, the call succeeded — suppress teardown noise.
                 if _call_result is None:
-                    logger.warning(f"call_mcp_tool_with_retry: ExceptionGroup raised and no result captured for {mcp_tool.name}: {eg}")
+                    logger.warning(
+                        f"call_mcp_tool_with_retry: ExceptionGroup raised and no result captured for {mcp_tool.name}: {eg}"
+                    )
                     raise
                 logger.debug(
                     f"call_mcp_tool_with_retry: Ignoring ExceptionGroup on teardown for {mcp_tool.name} "
@@ -183,7 +193,9 @@ async def call_mcp_tool_with_retry(agw_client: Any, mcp_tool: Any, **kwargs: Any
             result = str(_call_result) if _call_result else ""
 
             if not result:
-                logger.warning(f"call_mcp_tool_with_retry: Tool {mcp_tool.name} returned empty result")
+                logger.warning(
+                    f"call_mcp_tool_with_retry: Tool {mcp_tool.name} returned empty result"
+                )
                 result = ""
 
             # Truncate large responses to prevent OOM
@@ -194,12 +206,16 @@ async def call_mcp_tool_with_retry(agw_client: Any, mcp_tool: Any, **kwargs: Any
                 )
                 result = result[:MCP_MAX_RESPONSE_CHARS] + """\n...[truncated]"""
 
-            logger.info(f"MCP tool '{mcp_tool.name}' returned successfully (response length: {len(result)} chars)")
+            logger.info(
+                f"MCP tool '{mcp_tool.name}' returned successfully (response length: {len(result)} chars)"
+            )
             return result
 
         except Exception as e:
             if not _is_retryable_error(e):
-                logger.exception(f"call_mcp_tool_with_retry: Non-retryable error calling {mcp_tool.name}")
+                logger.exception(
+                    f"call_mcp_tool_with_retry: Non-retryable error calling {mcp_tool.name}"
+                )
                 raise
             last_exc = e
             if attempt < _MCP_RETRY_ATTEMPTS:
@@ -209,5 +225,8 @@ async def call_mcp_tool_with_retry(agw_client: Any, mcp_tool: Any, **kwargs: Any
                 )
                 await asyncio.sleep(_MCP_RETRY_DELAY)
 
-    logger.exception(f"call_mcp_tool_with_retry: Failed to call {mcp_tool.name} after {1 + _MCP_RETRY_ATTEMPTS} attempts", exc_info=last_exc)
+    logger.exception(
+        f"call_mcp_tool_with_retry: Failed to call {mcp_tool.name} after {1 + _MCP_RETRY_ATTEMPTS} attempts",
+        exc_info=last_exc,
+    )
     raise last_exc  # type: ignore[misc]
