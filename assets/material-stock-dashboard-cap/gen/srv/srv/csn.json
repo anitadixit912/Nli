@@ -76,11 +76,16 @@
         "RiskReason": {
           "type": "cds.String",
           "length": 60
+        },
+        "RiskDescription": {
+          "type": "cds.String",
+          "length": 500
         }
       }
     },
     "StockService.StockThresholdConfig": {
       "kind": "entity",
+      "@readonly": true,
       "projection": {
         "from": {
           "ref": [
@@ -106,15 +111,33 @@
         }
       }
     },
+    "StockService.updateThreshold": {
+      "kind": "action",
+      "params": {
+        "safetyStockPct": {
+          "type": "cds.Decimal",
+          "precision": 5,
+          "scale": 2,
+          "notNull": true
+        }
+      },
+      "returns": {
+        "type": "cds.Decimal",
+        "precision": 5,
+        "scale": 2
+      }
+    },
     "StockService.chat": {
       "kind": "action",
       "params": {
         "message": {
           "type": "cds.String",
+          "length": 1000,
           "notNull": true
         },
         "contextId": {
-          "type": "cds.String"
+          "type": "cds.String",
+          "length": 100
         }
       },
       "returns": {
