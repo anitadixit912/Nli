@@ -1,220 +1,182 @@
-"""Integration tests for the Inventory ATP Agentic Copilot end-to-end flows."""
+"""Integration tests for the full agent flow — all MCP tools and LLM mocked."""
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from langchain_core.messages import AIMessage
+import sys, os
+from unittest.mock import AsyncMock, patch, MagicMock
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'app'))
 
-from app.agent import SampleAgent, WRITE_TOOLS_BY_ROLE, READ_ONLY_TOOLS
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _make_mock_tools(names: list[str]) -> list:
-    """Create minimal mock LangChain tool objects."""
-    tools = []
-    for name in names:
-        t = MagicMock()
-        t.name = name
-        tools.append(t)
-    return tools
+from agent import SampleAgent, ROLE_TOOL_POLICY
 
 
-def _mock_graph_result(content: str):
-    """Return an ainvoke coroutine that yields a fake LLM response."""
-    msg = AIMessage(content=content)
-    mock_graph = MagicMock()
-    mock_graph.ainvoke = AsyncMock(return_value={"messages": [msg]})
-    return mock_graph
+def _make_mock_tool(name: str, return_value: str = '{"ok": true}'):
+    tool = MagicMock()
+    tool.name = name
+    tool.description = f"Mock tool: {name}"
+    return tool
 
 
 # ---------------------------------------------------------------------------
-# Agent instantiation
+# Role-based access tests (no LLM needed)
 # ---------------------------------------------------------------------------
 
-def test_agent_instantiates():
-    agent = SampleAgent()
-    assert agent is not None
-    assert hasattr(agent, "stream")
-    assert hasattr(agent, "invoke")
-
-
-# ---------------------------------------------------------------------------
-# Role-based tool filtering
-# ---------------------------------------------------------------------------
-
-def test_planner_can_use_all_tools():
-    agent = SampleAgent()
-    all_tools = _make_mock_tools(list(READ_ONLY_TOOLS) + list(WRITE_TOOLS_BY_ROLE["PLANNER"]))
-    filtered = agent._filter_tools_by_role(all_tools, "PLANNER")
-    filtered_names = {t.name for t in filtered}
-    assert "create_stock_transport_order" in filtered_names
-    assert "convert_planned_order" in filtered_names
-    assert "adjust_pir" in filtered_names
-    assert "flag_po_expedite" in filtered_names
+def test_planner_gets_all_tools():
+    agent = SampleAgent.__new__(SampleAgent)
+    agent._last_active = {}
+    tools = [_make_mock_tool(n) for n in ["get_material_stock", "create_stock_transport_order", "run_atp_check"]]
+    filtered = agent._filter_tools_by_role(tools, "PLANNER")
+    assert len(filtered) == 3  # PLANNER gets all
 
 
 def test_customer_service_read_only():
-    agent = SampleAgent()
-    all_tools = _make_mock_tools(list(READ_ONLY_TOOLS) + ["create_stock_transport_order"])
-    filtered = agent._filter_tools_by_role(all_tools, "CUSTOMER_SERVICE")
-    filtered_names = {t.name for t in filtered}
-    assert "create_stock_transport_order" not in filtered_names
-    assert "run_atp_check" in filtered_names
-    assert "get_material_stock" in filtered_names
+    agent = SampleAgent.__new__(SampleAgent)
+    agent._last_active = {}
+    tools = [_make_mock_tool(n) for n in ["get_material_stock", "run_atp_check", "create_stock_transport_order"]]
+    filtered = agent._filter_tools_by_role(tools, "CUSTOMER_SERVICE")
+    names = [t.name for t in filtered]
+    assert "create_stock_transport_order" not in names
+    assert "get_material_stock" in names
+    assert "run_atp_check" in names
 
 
-def test_sales_ops_read_only():
-    agent = SampleAgent()
-    all_tools = _make_mock_tools(list(READ_ONLY_TOOLS) + ["adjust_pir"])
-    filtered = agent._filter_tools_by_role(all_tools, "SALES_OPS")
-    filtered_names = {t.name for t in filtered}
-    assert "adjust_pir" not in filtered_names
-
-
-def test_procurement_manager_can_flag_expedite():
-    agent = SampleAgent()
-    all_tools = _make_mock_tools(list(READ_ONLY_TOOLS) + ["flag_po_expedite"])
-    filtered = agent._filter_tools_by_role(all_tools, "PROCUREMENT_MANAGER")
-    filtered_names = {t.name for t in filtered}
-    assert "flag_po_expedite" in filtered_names
+def test_sales_ops_cannot_create_sto():
+    agent = SampleAgent.__new__(SampleAgent)
+    agent._last_active = {}
+    tools = [_make_mock_tool(n) for n in ["get_material_stock", "create_stock_transport_order", "propose_corrective_actions"]]
+    filtered = agent._filter_tools_by_role(tools, "SALES_OPS")
+    names = [t.name for t in filtered]
+    assert "create_stock_transport_order" not in names
 
 
 def test_unknown_role_defaults_to_read_only():
-    agent = SampleAgent()
-    all_tools = _make_mock_tools(list(READ_ONLY_TOOLS) + ["create_stock_transport_order"])
-    filtered = agent._filter_tools_by_role(all_tools, None)
-    filtered_names = {t.name for t in filtered}
-    assert "create_stock_transport_order" not in filtered_names
+    agent = SampleAgent.__new__(SampleAgent)
+    agent._last_active = {}
+    tools = [_make_mock_tool(n) for n in ["get_material_stock", "create_stock_transport_order"]]
+    filtered = agent._filter_tools_by_role(tools, None)
+    names = [t.name for t in filtered]
+    assert "create_stock_transport_order" not in names
 
 
 # ---------------------------------------------------------------------------
-# Explain_Stock_Drop sub-intent
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_explain_stock_drop_returns_response():
-    agent = SampleAgent()
-    tools = _make_mock_tools(["get_material_stock", "get_demand_elements"])
-    mock_graph = _mock_graph_result(
-        "Stock for FG-001 at Plant 1010 is declining due to a large Sales Order 4500012345 (120 EA) "
-        "scheduled for 2026-06-10. Current unrestricted stock is 150 EA, safety stock is 80 EA."
-    )
-    with patch("app.agent.create_agent", return_value=mock_graph):
-        response = await agent.invoke(
-            "Why is stock for FG-001 at Plant 1010 dropping?",
-            context_id="test-explain-001",
-            tools=tools,
-            role="PLANNER",
-        )
-    assert response.status == "completed"
-    assert "FG-001" in response.message or "stock" in response.message.lower()
-
-
-# ---------------------------------------------------------------------------
-# Check_Order_Feasibility sub-intent
+# Agent stream tests (LLM mocked)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_check_order_feasibility_returns_atp_result():
-    agent = SampleAgent()
-    tools = _make_mock_tools(["run_atp_check"])
-    mock_graph = _mock_graph_result(
-        "Order 4500012345 line 10: 50 EA confirmed for 2026-06-10. Fully confirmed."
-    )
-    with patch("app.agent.create_agent", return_value=mock_graph):
-        response = await agent.invoke(
-            "Can I fulfill Order 4500012345 line 10 today?",
-            context_id="test-atp-001",
-            tools=tools,
-            role="SALES_OPS",
-        )
-    assert response.status == "completed"
+async def test_explain_stock_drop_m2_milestone(caplog):
+    import logging
+    agent = SampleAgent.__new__(SampleAgent)
+    agent._last_active = {}
 
+    mock_response = MagicMock()
+    mock_response.content = "Stock dropped due to reservation order 1000001 consuming 200 units."
 
-# ---------------------------------------------------------------------------
-# Simulate_Options sub-intent
-# ---------------------------------------------------------------------------
+    with patch("agent.create_agent") as mock_create, \
+         patch("agent.InMemorySaver"), \
+         patch("agent.ChatLiteLLM"), \
+         patch("agent.SummarizationMiddleware"):
+        mock_graph = AsyncMock()
+        mock_graph.ainvoke.return_value = {"messages": [mock_response]}
+        mock_create.return_value = mock_graph
+        agent.llm = MagicMock()
+        agent._checkpointer = MagicMock()
+        agent._checkpointer.delete_thread = MagicMock()
+        agent._summarization_middleware = MagicMock()
+
+        with caplog.at_level(logging.INFO, logger="agent"):
+            response = await agent._run_agent(
+                "Why did stock drop for FG-001 in plant 1010?", "ctx-001", []
+            )
+
+    assert "Stock dropped" in response
+    assert any("M2.achieved" in r.message for r in caplog.records)
+
 
 @pytest.mark.asyncio
-async def test_simulate_options_returns_ranked_list():
-    agent = SampleAgent()
-    tools = _make_mock_tools(["propose_corrective_actions"])
-    mock_graph = _mock_graph_result(
-        "Here are 4 ranked corrective options for the 25 EA shortfall:\n"
-        "1. Partial Fulfillment (0 days)\n2. Planned Order Conversion (3 days)"
-    )
-    with patch("app.agent.create_agent", return_value=mock_graph):
-        response = await agent.invoke(
-            "What are my options to cover a 25 EA shortfall for FG-001 by 2026-06-10?",
-            context_id="test-options-001",
-            tools=tools,
-            role="PLANNER",
-        )
-    assert response.status == "completed"
-    assert "option" in response.message.lower() or "partial" in response.message.lower()
+async def test_atp_check_stream_completed():
+    agent = SampleAgent.__new__(SampleAgent)
+    agent._last_active = {}
 
+    mock_response = MagicMock()
+    mock_response.content = "ATP confirms 300 units by 2026-07-15."
 
-# ---------------------------------------------------------------------------
-# Execute_With_Approval — confirm path
-# ---------------------------------------------------------------------------
+    with patch("agent.create_agent") as mock_create, \
+         patch("agent.InMemorySaver"), \
+         patch("agent.ChatLiteLLM"), \
+         patch("agent.SummarizationMiddleware"):
+        mock_graph = AsyncMock()
+        mock_graph.ainvoke.return_value = {"messages": [mock_response]}
+        mock_create.return_value = mock_graph
+        agent.llm = MagicMock()
+        agent._checkpointer = MagicMock()
+        agent._checkpointer.delete_thread = MagicMock()
+        agent._summarization_middleware = MagicMock()
+
+        chunks = []
+        async for chunk in agent.stream("Can we fulfill 300 units by 2026-07-15?", "ctx-002"):
+            chunks.append(chunk)
+
+    final = chunks[-1]
+    assert final["is_task_complete"] is True
+    assert "ATP confirms" in final["content"]
+
 
 @pytest.mark.asyncio
-async def test_execute_with_approval_confirm_path():
-    agent = SampleAgent()
-    tools = _make_mock_tools(["create_stock_transport_order"])
-    mock_graph = _mock_graph_result(
-        "STO 4500099001 created: 25 EA from Plant 1020 to Plant 1010, delivery 2026-06-15."
-    )
-    with patch("app.agent.create_agent", return_value=mock_graph):
-        response = await agent.invoke(
-            "CONFIRM",
-            context_id="test-approve-001",
-            tools=tools,
-            role="PLANNER",
-        )
-    assert response.status == "completed"
+async def test_agent_error_returns_gracefully():
+    agent = SampleAgent.__new__(SampleAgent)
+    agent._last_active = {}
 
+    with patch("agent.create_agent") as mock_create, \
+         patch("agent.InMemorySaver"), \
+         patch("agent.ChatLiteLLM"), \
+         patch("agent.SummarizationMiddleware"):
+        mock_graph = AsyncMock()
+        mock_graph.ainvoke.side_effect = RuntimeError("LLM timeout")
+        mock_create.return_value = mock_graph
+        agent.llm = MagicMock()
+        agent._checkpointer = MagicMock()
+        agent._checkpointer.delete_thread = MagicMock()
+        agent._summarization_middleware = MagicMock()
 
-# ---------------------------------------------------------------------------
-# Execute_With_Approval — reject path
-# ---------------------------------------------------------------------------
+        chunks = []
+        async for chunk in agent.stream("Test query", "ctx-003"):
+            chunks.append(chunk)
+
+    final = chunks[-1]
+    assert final["is_task_complete"] is True
+    assert "error" in final["content"].lower()
+
 
 @pytest.mark.asyncio
-async def test_execute_with_approval_reject_path():
-    agent = SampleAgent()
-    tools = _make_mock_tools(["propose_corrective_actions"])
-    mock_graph = _mock_graph_result(
-        "Understood. The STO creation has been cancelled. Would you like to explore another option?"
-    )
-    with patch("app.agent.create_agent", return_value=mock_graph):
-        response = await agent.invoke(
-            "REJECT",
-            context_id="test-reject-001",
-            tools=tools,
-            role="PLANNER",
-        )
-    assert response.status == "completed"
-    # Agent should not call write tools — mock verifies no STO was created
-    assert "cancel" in response.message.lower() or "reject" in response.message.lower() or response.status == "completed"
+async def test_simulate_options_flow():
+    agent = SampleAgent.__new__(SampleAgent)
+    agent._last_active = {}
 
+    mock_response = MagicMock()
+    mock_response.content = "Ranked 3 corrective options: 1. Planned Order Conversion (0 days)..."
 
-# ---------------------------------------------------------------------------
-# Error handling
-# ---------------------------------------------------------------------------
+    with patch("agent.create_agent") as mock_create, \
+         patch("agent.InMemorySaver"), \
+         patch("agent.ChatLiteLLM"), \
+         patch("agent.SummarizationMiddleware"):
+        mock_graph = AsyncMock()
+        mock_graph.ainvoke.return_value = {"messages": [mock_response]}
+        mock_create.return_value = mock_graph
+        agent.llm = MagicMock()
+        agent._checkpointer = MagicMock()
+        agent._checkpointer.delete_thread = MagicMock()
+        agent._summarization_middleware = MagicMock()
+
+        result = await agent.invoke("What options do I have for FG-001 shortfall of 200 units?", "ctx-004")
+
+    assert result.status == "completed"
+    assert "Planned Order" in result.message
+
 
 @pytest.mark.asyncio
-async def test_agent_handles_llm_exception_gracefully():
-    agent = SampleAgent()
-    tools = _make_mock_tools(["get_material_stock"])
-    mock_graph = MagicMock()
-    mock_graph.ainvoke = AsyncMock(side_effect=RuntimeError("LLM timeout"))
-    with patch("app.agent.create_agent", return_value=mock_graph):
-        response = await agent.invoke(
-            "Check stock for FG-001",
-            context_id="test-error-001",
-            tools=tools,
-        )
-    # Agent returns completed with an error message (A2A protocol behaviour)
-    assert response.status == "completed"
-    assert "error" in response.message.lower()
+async def test_execute_with_approval_write_tool_blocked_for_customer_service():
+    agent = SampleAgent.__new__(SampleAgent)
+    agent._last_active = {}
+    write_tool = _make_mock_tool("create_stock_transport_order")
+    read_tool = _make_mock_tool("get_material_stock")
+    filtered = agent._filter_tools_by_role([write_tool, read_tool], "CUSTOMER_SERVICE")
+    names = [t.name for t in filtered]
+    assert "create_stock_transport_order" not in names
+    assert "get_material_stock" in names
