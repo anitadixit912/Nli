@@ -6,16 +6,53 @@ const { mockStockData } = require('../test/data/material-stock-mock');
 // Agent service URL — override via env var when deployed
 const AGENT_URL = process.env.AGENT_SERVICE_URL || 'http://localhost:5000';
 
+// ── In-memory threshold cache ─────────────────────────────────────────────
+// Avoids dispatching UPDATE/SELECT through the service layer (which would
+// be blocked by the @readonly annotation on StockThresholdConfig).
+// Seeded from the database on first request; updated in-place by updateThreshold.
+let _thresholdPct = null; // null = not yet loaded
+
+async function loadThreshold(db) {
+  try {
+    const rows = await db.run(SELECT.from('material_stock_StockThresholdConfig').where({ id: 1 }));
+    if (rows && rows.length > 0) {
+      _thresholdPct = Number(rows[0].safetyStockPct);
+      cds.log('stock-service').info(`Threshold loaded from DB: ${_thresholdPct}%`);
+    }
+  } catch (e) {
+    cds.log('stock-service').warn('Could not load threshold from DB, using default 20%:', e.message);
+  }
+  if (_thresholdPct === null) _thresholdPct = 20;
+  return _thresholdPct;
+}
+
+async function saveThreshold(db, pct) {
+  try {
+    const rows = await db.run(SELECT.from('material_stock_StockThresholdConfig').where({ id: 1 }));
+    if (rows && rows.length > 0) {
+      await db.run(UPDATE('material_stock_StockThresholdConfig').set({ safetyStockPct: pct }).where({ id: 1 }));
+    } else {
+      await db.run(INSERT.into('material_stock_StockThresholdConfig').entries({ id: 1, safetyStockPct: pct }));
+    }
+  } catch (e) {
+    // Persist is best-effort; in-memory cache is the source of truth
+    cds.log('stock-service').warn('Could not persist threshold to DB:', e.message);
+  }
+}
+
 module.exports = class StockService extends cds.ApplicationService {
 
   async init() {
     const { MaterialStockView, StockThresholdConfig } = this.entities;
+    const db = await cds.connect.to('db');
+
+    // Seed the in-memory threshold from the database on startup
+    await loadThreshold(db);
 
     // ── READ MaterialStockView ──────────────────────────────────────────────
     this.on('READ', MaterialStockView, async (req) => {
-      // 1. Load threshold config (default: 20%)
-      const configs = await SELECT.from(StockThresholdConfig).where({ id: 1 });
-      const safetyStockPct = configs.length > 0 ? Number(configs[0].safetyStockPct) : 20;
+      // 1. Use in-memory threshold (always current — updated by updateThreshold action)
+      const safetyStockPct = _thresholdPct !== null ? _thresholdPct : 20;
 
       // 2. In production: fetch live data from S/4HANA via external service.
       //    For local development, use mock data.
@@ -42,7 +79,13 @@ module.exports = class StockService extends cds.ApplicationService {
           MaterialDescription: '',
         }));
       } catch {
-        // Fall back to mock data when no real destination is configured
+        // Fall back to mock data when no real destination is configured.
+        // WARNING: Mock data is being used — real S/4HANA destination (S4HANA_MATERIAL_STOCK)
+        // is unavailable. Do NOT use mock data in a production environment.
+        cds.log('stock-service').warn(
+          'SECURITY WARNING: Falling back to mock stock data — S4HANA_MATERIAL_STOCK destination ' +
+          'is not configured. Configure the destination before going to production.'
+        );
         rawStock = mockStockData.map(r => ({
           Material            : r.Material,
           Plant               : r.Plant,
@@ -72,9 +115,36 @@ module.exports = class StockService extends cds.ApplicationService {
       return result;
     });
 
+    // ── UPDATETHRESHOLD action — controlled write path for StockThresholdConfig ──
+    this.on('updateThreshold', async (req) => {
+      const { safetyStockPct } = req.data;
+      const pct = Number(safetyStockPct);
+      if (isNaN(pct) || pct < 0 || pct > 100) {
+        req.error(400, 'safetyStockPct must be a number between 0 and 100.');
+        return;
+      }
+      // Update in-memory cache immediately — this is what the READ handler uses
+      _thresholdPct = pct;
+      // Persist to DB best-effort (async, don't block the response)
+      saveThreshold(db, pct).catch(() => {});
+      console.log(`Threshold updated to ${pct}% (in-memory)`);
+      return pct;
+    });
+
     // ── CHAT action — proxy to Stock Advisor Agent ─────────────────────────
     this.on('chat', async (req) => {
       const { message, contextId } = req.data;
+
+      // Server-side guard: reject messages exceeding the 1000-char limit
+      if (!message || message.trim().length === 0) {
+        req.error(400, 'Message must not be empty.');
+        return;
+      }
+      if (message.length > 1000) {
+        req.error(400, 'Message exceeds maximum allowed length of 1000 characters.');
+        return;
+      }
+
       const threadId = contextId || `thread-${Date.now()}`;
 
       try {
@@ -84,7 +154,7 @@ module.exports = class StockService extends cds.ApplicationService {
       } catch (err) {
         // Agent not available — fall back to rule-based recommendations
         cds.log('stock-service').warn('Agent unavailable, using rule-based fallback:', err.message);
-        return ruleBasedRecommendation(message, await this.getClassifiedStock(req));
+        return ruleBasedRecommendation(message, await this.getClassifiedStock());
       }
     });
 
@@ -92,13 +162,28 @@ module.exports = class StockService extends cds.ApplicationService {
   }
 
   /** Helper: get classified stock data (reused by fallback) */
-  async getClassifiedStock(req) {
-    const { StockThresholdConfig } = this.entities;
-    const configs = await SELECT.from(StockThresholdConfig).where({ id: 1 });
-    const safetyStockPct = configs.length > 0 ? Number(configs[0].safetyStockPct) : 20;
+  async getClassifiedStock() {
+    const safetyStockPct = _thresholdPct !== null ? _thresholdPct : 20;
     return mockStockData.map(item => classify(item, safetyStockPct));
   }
 };
+
+/**
+ * Format a RiskReason code into a human-readable explanation with actual values.
+ * e.g. BOTH → "Below Reorder Point (stock 1 < reorder 10) AND Below Safety Stock threshold (stock 1 < 20% of 30 = 6)"
+ */
+function formatRiskReason(riskReason, stock, reorderPoint, safetyStock, safetyStockPct = 20) {
+  const ropLine  = `Below Reorder Point (stock ${stock} < reorder point ${reorderPoint})`;
+  const ssThresh = Math.round(safetyStock * safetyStockPct / 100);
+  const ssLine   = `Below Safety Stock threshold (stock ${stock} < ${safetyStockPct}% of safety stock ${safetyStock} = ${ssThresh})`;
+
+  switch (riskReason) {
+    case 'REORDER_POINT_BREACH':    return ropLine;
+    case 'SAFETY_STOCK_PCT_BREACH': return ssLine;
+    case 'BOTH':                    return `${ropLine} AND ${ssLine}`;
+    default:                        return riskReason.replace(/_/g, ' ');
+  }
+}
 
 /**
  * Classify a stock item as SUFFICIENT or NEARLY_OUT_OF_STOCK based on:
@@ -128,55 +213,141 @@ function classify(item, safetyStockPct) {
     RiskReason  = 'SAFETY_STOCK_PCT_BREACH';
   }
 
-  return { ...item, StockStatus, RiskReason };
+  const RiskDescription = RiskReason
+    ? formatRiskReason(RiskReason, qty, reorderPoint, safetyStock, safetyStockPct)
+    : null;
+
+  return { ...item, StockStatus, RiskReason, RiskDescription };
+}
+
+/**
+ * Fetch a client-credentials Bearer token from XSUAA.
+ * Reads credentials from VCAP_SERVICES (bound xsuaa instance).
+ * Returns the access_token string, or null if XSUAA is not configured.
+ */
+async function fetchXsuaaToken() {
+  try {
+    const vcap = JSON.parse(process.env.VCAP_SERVICES || '{}');
+    const xsuaaBinding = (vcap.xsuaa || [])[0];
+    if (!xsuaaBinding) {
+      cds.log('stock-service').warn('No XSUAA binding found — calling agent without token');
+      return null;
+    }
+    const { clientid, clientsecret, url } = xsuaaBinding.credentials;
+    const tokenUrl = `${url}/oauth/token`;
+    const parsedUrl = new URL(tokenUrl);
+    const body = `grant_type=client_credentials&client_id=${encodeURIComponent(clientid)}&client_secret=${encodeURIComponent(clientsecret)}`;
+
+    return new Promise((resolve, reject) => {
+      const transport = require('https');
+      const opts = {
+        hostname: parsedUrl.hostname,
+        port    : 443,
+        path    : parsedUrl.pathname,
+        method  : 'POST',
+        headers : {
+          'Content-Type'  : 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(body),
+        },
+        timeout: 10000,
+      };
+      const req = transport.request(opts, (res) => {
+        let raw = '';
+        res.on('data', chunk => { raw += chunk; });
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(raw);
+            if (parsed.access_token) {
+              resolve(parsed.access_token);
+            } else {
+              cds.log('stock-service').warn('XSUAA token response missing access_token:', raw.slice(0, 200));
+              resolve(null);
+            }
+          } catch (e) {
+            reject(new Error('Failed to parse XSUAA token response: ' + e.message));
+          }
+        });
+      });
+      req.on('error',   reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('XSUAA token request timed out')); });
+      req.write(body);
+      req.end();
+    });
+  } catch (e) {
+    cds.log('stock-service').warn('fetchXsuaaToken error:', e.message);
+    return null;
+  }
 }
 
 /**
  * Send a message to the Stock Advisor Agent via A2A protocol.
  * Returns the agent's final text response.
+ * Supports both http:// (local dev) and https:// (deployed) agent URLs.
+ * Attaches a Bearer token from XSUAA when available.
  */
 async function callAgent(message, contextId) {
   const taskId   = `task-${Date.now()}`;
   const payload  = {
     jsonrpc: '2.0',
     id: taskId,
-    method: 'tasks/send',
+    method: 'message/send',
     params: {
-      id: taskId,
-      sessionId: contextId,
       message: {
+        messageId: taskId,
+        contextId: contextId,
         role: 'user',
         parts: [{ type: 'text', text: message }],
       },
-      acceptedOutputModes: ['text'],
     },
   };
 
+  // Fetch XSUAA token for authenticating against the protected agent endpoint
+  const token = await fetchXsuaaToken();
+
   return new Promise((resolve, reject) => {
-    const url  = new URL(`${AGENT_URL}/`);
+    const parsedUrl = new URL(`${AGENT_URL}/`);
+    const isHttps   = parsedUrl.protocol === 'https:';
+    const transport = isHttps ? require('https') : require('http');
+    const defaultPort = isHttps ? 443 : 5000;
     const body = JSON.stringify(payload);
+    const headers = {
+      'Content-Type'  : 'application/json',
+      'Content-Length': Buffer.byteLength(body),
+    };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
     const opts = {
-      hostname: url.hostname,
-      port    : Number(url.port) || 5000,
-      path    : url.pathname,
+      hostname: parsedUrl.hostname,
+      port    : Number(parsedUrl.port) || defaultPort,
+      path    : parsedUrl.pathname,
       method  : 'POST',
-      headers : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      headers,
       timeout : 30000,
     };
-    const http = require('http');
-    const req  = http.request(opts, (res) => {
+    const req = transport.request(opts, (res) => {
       let raw = '';
       res.on('data', chunk => { raw += chunk; });
       res.on('end', () => {
+        if (res.statusCode >= 400) {
+          reject(new Error(`Agent returned HTTP ${res.statusCode}: ${raw.slice(0, 200)}`));
+          return;
+        }
         try {
           const parsed = JSON.parse(raw);
-          // Extract text from A2A response
-          const artifacts = parsed?.result?.artifacts || [];
-          const text = artifacts
-            .flatMap(a => a.parts || [])
-            .filter(p => p.type === 'text')
+          // Extract text from A2A message/send response
+          // New format: result.parts[] or result.message.parts[]
+          const result = parsed?.result;
+          const parts  =
+            result?.parts ||
+            result?.message?.parts ||
+            result?.artifacts?.flatMap(a => a.parts || []) ||
+            [];
+          const text = parts
+            .filter(p => p.type === 'text' || p.kind === 'text')
             .map(p => p.text)
-            .join('\n') || parsed?.result?.status?.message?.parts?.[0]?.text || 'No response from agent.';
+            .join('\n') || 'No response from agent.';
+          cds.log('stock-service').info('Agent response received successfully');
           resolve(text);
         } catch (e) {
           reject(new Error('Failed to parse agent response: ' + e.message));
@@ -192,6 +363,7 @@ async function callAgent(message, contextId) {
 
 /**
  * Rule-based fallback: answer common stock questions from classified data.
+ * Handles: specific material lookups, plant queries, summary, critical, reorder.
  */
 function ruleBasedRecommendation(message, stockData) {
   const q        = (message || '').toLowerCase();
@@ -199,7 +371,58 @@ function ruleBasedRecommendation(message, stockData) {
   const critical = atRisk.filter(r => r.RiskReason === 'BOTH');
   const sufficient = stockData.filter(r => r.StockStatus === 'SUFFICIENT');
 
-  // Summary question
+  // ── Specific material lookup ─────────────────────────────────────────────
+  // Extracts ALL material IDs (pattern MAT-XXXX) mentioned in the message.
+  // Handles comma/and-separated lists: "MAT-2001, MAT-3003" or "MAT-2001 and MAT-3003"
+  const allMaterialIds = [...new Set(
+    (message.match(/\b([A-Za-z]+-[0-9]{3,})\b/gi) || []).map(id => id.toUpperCase())
+  )];
+
+  if (allMaterialIds.length > 0) {
+    const results = [];
+    const notFound = [];
+
+    for (const token of allMaterialIds) {
+      let matches = stockData.filter(r => r.Material === token);
+      if (!matches.length) {
+        matches = stockData.filter(r => r.Material.startsWith(token));
+      }
+      if (matches.length === 0) {
+        notFound.push(token);
+      } else if (matches.length === 1) {
+        const m = matches[0];
+        const icon = m.StockStatus === 'SUFFICIENT' ? '✅' : '⚠️';
+        const riskLine = m.RiskDescription
+          ? `\n- Risk Reason: ${m.RiskDescription}`
+          : '';
+        results.push(
+          `${icon} **Material ${m.Material}** — ${m.MaterialDescription || 'No description'}\n\n` +
+          `- Plant: ${m.Plant} | Storage Location: ${m.StorageLocation}\n` +
+          `- Stock Quantity: **${m.StockQuantity} ${m.BaseUnit}**\n` +
+          `- Reorder Point: ${m.ReorderPoint} | Safety Stock: ${m.SafetyStock}\n` +
+          `- Status: **${m.StockStatus.replace(/_/g, ' ')}**${riskLine}`
+        );
+      } else {
+        const lines = matches.map(m =>
+          `- **${m.Material}** (${m.MaterialDescription}) — Plant ${m.Plant} / ${m.StorageLocation} | ` +
+          `Stock: ${m.StockQuantity} ${m.BaseUnit} | Status: ${m.StockStatus.replace(/_/g, ' ')}`
+        );
+        results.push(`**Materials matching "${token}" (${matches.length})**\n\n${lines.join('\n')}`);
+      }
+    }
+
+    if (notFound.length) {
+      results.push(`⚠️ No stock record found for: ${notFound.join(', ')}`);
+    }
+
+    // Return combined results only when at least one material was found or explicitly not found
+    if (results.length > 0) {
+      return results.join('\n\n---\n\n');
+    }
+    // No matches at all — fall through to generic handlers
+  }
+
+  // ── Summary question ─────────────────────────────────────────────────────
   if (/summ|overview|status|how many/.test(q)) {
     return (
       `**Stock Health Summary**\n\n` +
@@ -212,7 +435,7 @@ function ruleBasedRecommendation(message, stockData) {
     );
   }
 
-  // Critical / urgent / most important
+  // ── Critical / urgent / most important ───────────────────────────────────
   if (/critical|urgent|most|priorit|worst/.test(q)) {
     if (!critical.length && !atRisk.length) return 'No critical stock issues found at this time.';
     const top = (critical.length ? critical : atRisk).slice(0, 5);
@@ -223,7 +446,7 @@ function ruleBasedRecommendation(message, stockData) {
     return `**Most Critical Materials to Reorder**\n\n${lines.join('\n')}`;
   }
 
-  // Reorder / what to order
+  // ── Reorder / what to order ───────────────────────────────────────────────
   if (/reorder|order|buy|replenish|purchas/.test(q)) {
     if (!atRisk.length) return 'No materials require reordering at this time.';
     const lines = atRisk.map(m =>
@@ -236,19 +459,35 @@ function ruleBasedRecommendation(message, stockData) {
     );
   }
 
-  // Plant-specific question
+  // ── Plant-specific question ───────────────────────────────────────────────
   const plantMatch = q.match(/plant\s+(\w+)/i);
   if (plantMatch) {
     const plant = plantMatch[1].toUpperCase();
-    const plantRisk = atRisk.filter(r => r.Plant === plant);
-    if (!plantRisk.length) return `No at-risk materials found for plant ${plant}.`;
+    const plantItems = stockData.filter(r => r.Plant === plant);
+    if (!plantItems.length) return `No materials found for plant ${plant}.`;
+    const plantRisk = plantItems.filter(r => r.StockStatus === 'NEARLY_OUT_OF_STOCK');
+    if (!plantRisk.length) return `✅ All ${plantItems.length} materials in plant ${plant} have sufficient stock.`;
     const lines = plantRisk.map(m =>
-      `- **${m.Material}** (${m.MaterialDescription}) — ${m.StorageLocation} | Stock: ${m.StockQuantity} ${m.BaseUnit}`
+      `- **${m.Material}** (${m.MaterialDescription}) — ${m.StorageLocation} | ` +
+      `Stock: ${m.StockQuantity} ${m.BaseUnit} | Status: ${m.StockStatus.replace(/_/g, ' ')}`
     );
-    return `**At-Risk Materials in Plant ${plant} (${plantRisk.length})**\n\n${lines.join('\n')}`;
+    return `**At-Risk Materials in Plant ${plant} (${plantRisk.length} / ${plantItems.length} total)**\n\n${lines.join('\n')}`;
   }
 
-  // Default: full recommendations
+  // ── Storage location question ─────────────────────────────────────────────
+  const slMatch = q.match(/(?:storage\s+location|sloc|loc(?:ation)?)\s+(\w+)/i);
+  if (slMatch) {
+    const sloc = slMatch[1].toUpperCase();
+    const slocItems = stockData.filter(r => r.StorageLocation === sloc);
+    if (!slocItems.length) return `No materials found for storage location ${sloc}.`;
+    const lines = slocItems.map(m =>
+      `- **${m.Material}** (${m.MaterialDescription}) — Plant ${m.Plant} | ` +
+      `Stock: ${m.StockQuantity} ${m.BaseUnit} | Status: ${m.StockStatus.replace(/_/g, ' ')}`
+    );
+    return `**Materials in Storage Location ${sloc} (${slocItems.length})**\n\n${lines.join('\n')}`;
+  }
+
+  // ── Default: at-risk overview ─────────────────────────────────────────────
   if (!atRisk.length) {
     return '✅ All materials currently have sufficient stock. No immediate action required.';
   }
@@ -260,24 +499,44 @@ function ruleBasedRecommendation(message, stockData) {
     `There are currently **${atRisk.length} material(s)** requiring attention:\n\n` +
     topLines.join('\n') +
     (atRisk.length > 8 ? `\n…and ${atRisk.length - 8} more.` : '') +
-    `\n\n💡 **Tip:** Ask me "What are the most critical items?" or "What should I reorder today?"`
+    `\n\n💡 **Tip:** Ask about a specific material (e.g. "What about MAT-1007?"), a plant ("Plant 1000"), or say "What should I reorder today?"`
   );
 }
 
 /**
- * Simple filter application for OData $filter on StockStatus.
- * Handles the common case: StockStatus eq 'VALUE'
+ * Apply OData $filter to in-memory classified stock data.
+ * Supports equality filters on any string field (e.g. Material, StockStatus, Plant).
+ * CQN 'where' array shape: [{ ref: ['FieldName'] }, '=', { val: 'VALUE' }]
  */
 function applyFilter(data, where) {
-  // where is a CQN array like ['StockStatus', '=', 'SUFFICIENT']
-  if (!Array.isArray(where)) return data;
+  if (!Array.isArray(where) || where.length === 0) return data;
   try {
+    // Handle AND-combined conditions: [cond, 'and', cond, 'and', cond, ...]
+    if (where.some(el => el === 'and')) {
+      // Split on 'and' and recursively apply each condition
+      const conditions = [];
+      let current = [];
+      for (const el of where) {
+        if (el === 'and') {
+          conditions.push(current);
+          current = [];
+        } else {
+          current.push(el);
+        }
+      }
+      if (current.length) conditions.push(current);
+      return conditions.reduce((acc, cond) => applyFilter(acc, cond), data);
+    }
+
+    // Single equality condition: [{ ref: ['Field'] }, '=', { val: 'VALUE' }]
     const [left, op, right] = where;
-    if (left?.ref?.[0] === 'StockStatus' && (op === '=' || op === 'eq')) {
-      return data.filter(r => r.StockStatus === right?.val);
+    const field = left?.ref?.[0];
+    const value = right?.val;
+    if (field && (op === '=' || op === 'eq') && value !== undefined) {
+      return data.filter(r => String(r[field] ?? '') === String(value));
     }
   } catch {
-    // ignore filter errors, return all
+    // ignore filter parse errors — return unfiltered data
   }
   return data;
 }
